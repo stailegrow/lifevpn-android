@@ -2,6 +2,7 @@ package com.stailegrow.maxstrike
 
 import android.app.Application
 import com.stailegrow.maxstrike.core.GeoAssets
+import com.stailegrow.maxstrike.core.IntegrityGuard
 import com.stailegrow.maxstrike.core.RoutingStore
 import com.stailegrow.maxstrike.core.ServerStore
 import com.stailegrow.maxstrike.core.SettingsStore
@@ -29,6 +30,8 @@ import kotlinx.coroutines.launch
 class MaxStrikeApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        // Релизная сборка, переподписанная чужим ключом, молча закрывается.
+        IntegrityGuard.enforce(this)
         ServerStore.init(this)
         ServerStore.startAutoRefresh()
         ThemeStore.init(this)
