@@ -14,6 +14,13 @@
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
 
+    <!-- Обновления приложения качаются и ставятся прямо из него (см.
+         core/UpdateChecker.kt) — своего магазина у Life VPN нет, только
+         GitHub Releases. Для показа системного установщика на скачанный
+         APK нужно это разрешение (Android 8+; на более старых версиях
+         роль играет общий тумблер "Неизвестные источники"). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- Нужно на Android 11+ (API 30+), чтобы queryIntentActivities в
          AppPickerDialog вообще видел чужие приложения для раздельного
          туннелирования — без этого блока список окажется пустым. -->
@@ -57,6 +64,44 @@
                 <action android:name="android.net.VpnService" />
             </intent-filter>
         </service>
+
+        <!-- Плитка в шторке "Быстрые настройки" (VpnQuickTile.kt) - системный
+             API TileService, доступен с API 24 (наш minSdk). exported=true и
+             BIND_QUICK_SETTINGS_TILE - обязательные системные требования
+             (иначе система не сможет привязаться к сервису из шторки), сам
+             биндинг всё равно ограничен системным UI этим разрешением.
+             Иконка тут - только дефолт на случай, если система запросит её
+             до первого вызова onStartListening()/render(): в рабочем режиме
+             VpnQuickTile.render() всегда переопределяет tile.icon явно
+             (ic_tile_off/ic_tile_on - свой фирменный знак приложения, тот же
+             силуэт, что на лаунчере, залитый зелёным цветом "good" именно
+             когда VPN подключён). -->
+        <service
+            android:name=".vpn.VpnQuickTile"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_off"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!-- FileProvider — единственный безопасный способ отдать
+             системному установщику пакетов скачанный APK (обычный file://
+             URI из чужого приложения запрещён StrictMode начиная с
+             Android 7). Открывает наружу только app/src/main/res/xml/
+             file_paths.xml -> папку кэша "updates/", куда UpdateChecker.kt
+             кладёт файл. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
 </manifest>

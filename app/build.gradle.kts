@@ -24,8 +24,8 @@ android {
         applicationId = "com.stailegrow.lifevpn"
         minSdk = 24
         targetSdk = 37
-        versionCode = 1
-        versionName = "2.0.0"
+        versionCode = 5
+        versionName = "2.3.0"
 
         // libXray.aar (gomobile-сборка Xray-core) несёт libgojni.so сразу под
         // все 4 ABI (arm64-v8a/armeabi-v7a/x86/x86_64) — каждая копия по

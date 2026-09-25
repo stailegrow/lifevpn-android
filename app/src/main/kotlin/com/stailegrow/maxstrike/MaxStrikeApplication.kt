@@ -6,6 +6,10 @@ import com.stailegrow.maxstrike.core.RoutingStore
 import com.stailegrow.maxstrike.core.ServerStore
 import com.stailegrow.maxstrike.core.SettingsStore
 import com.stailegrow.maxstrike.core.ThemeStore
+import com.stailegrow.maxstrike.core.UpdateChecker
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 /**
  * Инициализация сторов здесь, а не только в MainActivity.onCreate() —
@@ -31,5 +35,20 @@ class MaxStrikeApplication : Application() {
         RoutingStore.init(this)
         GeoAssets.init(this)
         SettingsStore.init(this)
+
+        // Версия 2.2.0: базы правил (geosite.dat/geoip.dat) обновляются на
+        // каждом запуске приложения безусловно — см. подробный комментарий
+        // у GeoAssets.refreshOnLaunchBlocking(). Отдельный CoroutineScope
+        // (не привязан к жизненному циклу Activity — Application его не
+        // имеет) на Dispatchers.IO: сетевой запрос не должен блокировать
+        // onCreate(), а результат (даже неудачный) ничего не блокирует —
+        // GeoAssets сам молча промолчит об ошибке и оставит прежние файлы.
+        CoroutineScope(Dispatchers.IO).launch {
+            GeoAssets.refreshOnLaunchBlocking()
+        }
+
+        // Тихая проверка обновлений на GitHub при каждом запуске — по
+        // просьбе пользователя, см. подробности в UpdateChecker.kt.
+        UpdateChecker.checkOnLaunch()
     }
 }

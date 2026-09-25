@@ -4,6 +4,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import com.stailegrow.maxstrike.vpn.MaxStrikeVpnService
 import java.net.InetSocketAddress
 import java.net.Socket
 
@@ -56,6 +57,12 @@ object PingTester {
             try {
                 Socket().use { socket ->
                     socket.tcpNoDelay = true
+                    // См. MaxStrikeVpnService.protectSocket(): без этого при
+                    // поднятом VPN сокет сам уезжает в TUN, и Xray гонит его
+                    // через активный сервер как relay - задержка выходит
+                    // "через подключенный сервер" вместо честной задержки от
+                    // локального интернета, как и было задумано изначально.
+                    MaxStrikeVpnService.protectSocket(socket)
                     socket.connect(InetSocketAddress(host, port), timeoutMs)
                 }
                 ((System.nanoTime() - started) / 1_000_000L).toInt()

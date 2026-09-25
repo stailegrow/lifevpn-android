@@ -10,35 +10,67 @@ import java.net.URL
  * поднят — никакого отдельного сокета на socksPort/httpPort заводить не
  * нужно.
  *
- * Источник — публичный тестовый файл Hetzner (fsn1-speed.hetzner.com,
- * датацентр Falkenstein), которым годами открыто пользуются сторонние
- * спидтесты. Изначально брали официальный эндпоинт Cloudflare
- * (speed.cloudflare.com) — он честнее подходит под задачу (отдаёт ровно
- * нужное число байт вместо целого файла), но стабильно отвечал 403 даже
- * после обычного браузерного User-Agent. Раз дело не в заголовках,
- * вероятнее всего Cloudflare блокирует сам IP VPN-сервера как
- * хостинговый/датацентровый — это защита от ботов на их стороне, с
- * клиента это не обойти. Простой файл-хостинг без такой защиты —
- * надёжнее для трафика через прокси. (Первая попытка перейти на
- * speed.hetzner.de — не тот адрес, такого хоста не существует вовсе,
- * отсюда и "No address associated with hostname"; правильные адреса —
- * с префиксом дата-центра, вида fsn1-speed.hetzner.com.)
+ * Источники теста — сразу несколько, пробуем по очереди, пока один не
+ * сработает (см. CANDIDATES). Раньше был единственный источник
+ * (fsn1-speed.hetzner.com), и он честно работал, пока проверялся только
+ * при поднятом VPN — но пользователь сообщил, что без VPN замер вообще не
+ * идёт. Причина — тот же класс проблемы, что уже нашли на PingTester:
+ * Hetzner активно используется под VPN/прокси-инфраструктуру, и часть его
+ * подсетей блокируется на уровне российских операторов/DPI напрямую (без
+ * туннеля запрос идёт голым с обычного мобильного IP прямо на Hetzner —
+ * и обрывается); через VPN тот же запрос уходит зашифрованным на СВОЙ
+ * VLESS-сервер, а до Hetzner долетает уже из дата-центра, где эту блокировку
+ * встретить неоткуда — поэтому раньше и работало только с VPN.
  *
- * Файл целиком — 100 МБ, качать его весь не нужно: читаем, пока не
- * наберём достаточно данных или не кончится MAX_DURATION_MS, что
- * раньше, и просто прерываем поток.
+ * У Cloudflare (speed.cloudflare.com/__down) ровно обратная картина: сам
+ * сервис не блокируется в РФ (это популярнейший мировой CDN, его массово
+ * используют и российские сайты), но их встроенная защита от ботов
+ * блокирует запросы именно с IP датацентров/прокси-провайдеров — то есть
+ * стабильно давала 403 именно когда запрос шёл через VLESS-сервер (тоже
+ * датацентровый IP), а с обычного мобильного IP без VPN должна отвечать
+ * нормально. Ровно дополняет Hetzner: где не работает один — должен
+ * работать другой. Третий источник (CacheFly) — старый общеизвестный
+ * публичный тестовый хостинг, много лет используется сторонними
+ * скорость-тестами именно как раз потому, что почти нигде не блокируется;
+ * он тут просто на случай, если оба первых источника внезапно откажут
+ * одновременно на какой-то конкретной сети.
+ *
+ * Полные файлы у всех источников — десятки-сотни МБ, качать целиком не
+ * нужно: читаем, пока не наберём достаточно данных или не кончится
+ * MAX_DURATION_MS, что раньше, и просто прерываем поток.
  *
  * Блокирующий вызов — звать только с Dispatchers.IO.
  */
 object SpeedTester {
-    private const val TEST_URL = "https://fsn1-speed.hetzner.com/100MB.bin"
+
+    private data class Candidate(val url: String, val label: String)
+
+    // Порядок важен: Cloudflare первым, потому что с обычного (без VPN)
+    // мобильного IP он должен пройти почти всегда, а вот Hetzner именно в
+    // этом случае у части операторов рискует не открыться вовсе — быстрее
+    // получить рабочий результат с первой попытки, чем ждать таймаут.
+    private val CANDIDATES = listOf(
+        Candidate("https://speed.cloudflare.com/__down?bytes=104857600", "Cloudflare"),
+        Candidate("https://fsn1-speed.hetzner.com/100MB.bin", "Hetzner"),
+        Candidate("https://cachefly.cachefly.net/100mb.test", "CacheFly"),
+    )
+
     private const val MAX_DURATION_MS = 10_000L
+
+    // Раньше было общее значение (TIMEOUT_MS = 15000) и на подключение, и
+    // на чтение. Раздельные тайм-ауты нужны именно из-за перебора
+    // источников: если конкретный хост заблокирован (DPI просто роняет
+    // SYN/ClientHello), это обычно видно уже на этапе установления
+    // соединения — незачем ждать те же 15 секунд, что и на чтение данных
+    // у медленной, но рабочей сети, прежде чем перейти к следующему
+    // источнику из CANDIDATES.
+    private const val CONNECT_TIMEOUT_MS = 6_000
     // Через VPN-туннель (Reality/XHTTP поверх TLS, да ещё и с самим
     // подключением к серверу до кучи) до первого байта уходит заметно
     // больше времени, чем при прямом соединении без VPN — 8 секунд были
     // слишком жёстким таймаутом и на не самой быстрой сети роняли замер
     // ещё до того, как он успевал толком начаться.
-    private const val TIMEOUT_MS = 15_000
+    private const val READ_TIMEOUT_MS = 15_000
 
     // Нашли причину «сервер вернул код 403»: HttpURLConnection по
     // умолчанию шлёт заголовок вида "User-Agent: Java/17.0.2" — Cloudflare
@@ -54,13 +86,29 @@ object SpeedTester {
     data class Result(val mbps: Double)
 
     fun measureBlocking(): Result {
+        var lastError: SpeedTestException? = null
+        for (candidate in CANDIDATES) {
+            try {
+                return measureFrom(candidate.url)
+            } catch (e: SpeedTestException) {
+                // Не тот источник — пробуем следующий из CANDIDATES.
+                // Наружу отдаём ошибку только если отказали вообще все.
+                lastError = e
+            }
+        }
+        throw lastError ?: SpeedTestException(
+            L.t("Не удалось измерить скорость ни на одном источнике.", "Could not measure speed on any source."),
+        )
+    }
+
+    private fun measureFrom(url: String): Result {
         val connection = try {
-            URL(TEST_URL).openConnection() as HttpURLConnection
+            URL(url).openConnection() as HttpURLConnection
         } catch (e: Exception) {
             throw SpeedTestException(L.t("Неверный адрес теста.", "Invalid test address."))
         }
-        connection.connectTimeout = TIMEOUT_MS
-        connection.readTimeout = TIMEOUT_MS
+        connection.connectTimeout = CONNECT_TIMEOUT_MS
+        connection.readTimeout = READ_TIMEOUT_MS
         connection.setRequestProperty("User-Agent", USER_AGENT)
 
         try {

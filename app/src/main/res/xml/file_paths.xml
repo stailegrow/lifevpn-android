@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Пути, которые FileProvider разрешает отдавать наружу через content://
+     URI — только папка кэша updates/, куда UpdateChecker.kt качает APK
+     перед установкой (см. installUpdate()). Больше ничего не открываем. -->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path name="updates" path="updates/" />
+</paths>

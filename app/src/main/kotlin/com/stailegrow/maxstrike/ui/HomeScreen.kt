@@ -32,6 +32,7 @@ import com.stailegrow.maxstrike.ui.components.NoticeTone
 import com.stailegrow.maxstrike.ui.components.ServersCard
 import com.stailegrow.maxstrike.ui.components.SpeedCard
 import com.stailegrow.maxstrike.ui.components.SubscriptionCard
+import com.stailegrow.maxstrike.ui.components.UpdateBanner
 import com.stailegrow.maxstrike.ui.theme.HudType
 import com.stailegrow.maxstrike.ui.theme.LocalPalette
 import kotlinx.coroutines.launch
@@ -81,6 +82,8 @@ fun HomeScreen(onToggle: (ProxyConfig) -> Unit, modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxWidth(),
             )
         }
+
+        item(key = "update") { UpdateBanner() }
 
         routingNotice?.let { notice ->
             item(key = "notice") {

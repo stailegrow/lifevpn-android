@@ -32,6 +32,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.stailegrow.maxstrike.BuildConfig
@@ -44,6 +45,7 @@ import com.stailegrow.maxstrike.core.RoutingChecker
 import com.stailegrow.maxstrike.core.RoutingStore
 import com.stailegrow.maxstrike.core.SettingsStore
 import com.stailegrow.maxstrike.core.ThemeStore
+import com.stailegrow.maxstrike.core.UpdateChecker
 import com.stailegrow.maxstrike.model.RoutingPreset
 import com.stailegrow.maxstrike.ui.components.AppPickerDialog
 import com.stailegrow.maxstrike.ui.components.HudCard
@@ -72,6 +74,7 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
         item(key = "language") { LanguageCard() }
         item(key = "theme") { ThemeCard() }
         item(key = "behavior") { BehaviorCard() }
+        item(key = "update") { UpdateCard() }
         item(key = "about") { AboutCard() }
     }
 }
@@ -457,6 +460,92 @@ private fun ToggleRow(label: String, caption: String?, checked: Boolean, onCheck
             }
         }
         Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+/**
+ * Карточка "Обновления" — ручная проверка через GitHub Releases (та же
+ * логика, что и тихая проверка при запуске приложения, см.
+ * UpdateChecker.kt) плюс статус на все случаи: идёт проверка/скачивание,
+ * версия последняя, найдена новая, ошибка. Кнопка "Обновить"/"Установить"
+ * запускает то же самое действие, что и тап по баннеру на главном экране
+ * (UpdateBanner.kt) — единый источник состояния (UpdateChecker.state), тут
+ * просто ещё один способ до него добраться.
+ *
+ * Статус и кнопка собираются через var внутри исчерпывающего when по
+ * запечатанному (sealed) State — так компилятор Kotlin сам проверяет, что
+ * учтены все варианты, и не нужно городить Pair/Elvis ради nullable-пары
+ * "текст кнопки + обработчик", которую тут неоткуда было бы проверить
+ * компилятором (сборка на этой машине недоступна).
+ */
+@Composable
+private fun UpdateCard(modifier: Modifier = Modifier) {
+    val palette = LocalPalette.current
+    val context = LocalContext.current
+    val state by UpdateChecker.state.collectAsState()
+
+    val statusText: String
+    var buttonText: String? = null
+    var onButtonClick: (() -> Unit)? = null
+
+    when (val s = state) {
+        is UpdateChecker.State.Idle -> {
+            statusText = L.t("Проверяется при каждом запуске", "Checked on every launch")
+            buttonText = L.t("Проверить", "Check")
+            onButtonClick = { UpdateChecker.checkManually() }
+        }
+        is UpdateChecker.State.Checking -> {
+            statusText = L.t("Проверяем…", "Checking…")
+        }
+        is UpdateChecker.State.UpToDate -> {
+            statusText = L.t("У вас последняя версия", "You have the latest version")
+            buttonText = L.t("Проверить", "Check")
+            onButtonClick = { UpdateChecker.checkManually() }
+        }
+        is UpdateChecker.State.Available -> {
+            statusText = L.t("Доступна версия ${s.info.version}", "Version ${s.info.version} available")
+            buttonText = L.t("Скачать", "Download")
+            onButtonClick = { UpdateChecker.startDownload(context, s.info) }
+        }
+        is UpdateChecker.State.Downloading -> {
+            statusText = L.t("Скачивание… ${s.progress}%", "Downloading… ${s.progress}%")
+        }
+        is UpdateChecker.State.ReadyToInstall -> {
+            statusText = L.t("Скачано — готово к установке", "Downloaded — ready to install")
+            buttonText = L.t("Установить", "Install")
+            onButtonClick = {
+                if (UpdateChecker.canInstallPackages(context)) {
+                    UpdateChecker.installUpdate(context, s.apkFile)
+                } else {
+                    UpdateChecker.openInstallPermissionSettings(context)
+                }
+            }
+        }
+        is UpdateChecker.State.Failed -> {
+            statusText = s.message
+            buttonText = L.t("Повторить", "Retry")
+            val info = s.info
+            onButtonClick = {
+                if (info != null) UpdateChecker.startDownload(context, info) else UpdateChecker.checkManually()
+            }
+        }
+    }
+
+    HudCard(title = L.t("Обновления", "Updates"), modifier = modifier) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(statusText, style = HudType.body(12.sp), color = palette.textSecondary, modifier = Modifier.weight(1f))
+            val label = buttonText
+            val onClick = onButtonClick
+            if (label != null && onClick != null) {
+                TextButton(onClick = onClick) {
+                    Text(label, style = HudType.body(12.sp), color = palette.accent)
+                }
+            }
+        }
     }
 }
 

@@ -62,6 +62,17 @@ import com.stailegrow.maxstrike.ui.theme.MaxStrikeTheme
 // три экрана сразу; сами экраны друг про друга не знают.
 class MainActivity : ComponentActivity() {
 
+    companion object {
+        // Точка входа для VpnQuickTile.kt (плитка "Быстрых настроек"):
+        // сама плитка не может показать системный диалог согласия на VPN
+        // (это доступно только Activity) - если разрешение ещё не выдано,
+        // плитка открывает это Activity с этим action'ом и ID сервера, а
+        // дальше просто отрабатывает тот же requestToggle(), что и обычный
+        // тап по большой кнопке подключения.
+        const val ACTION_TILE_CONNECT = "com.stailegrow.maxstrike.ACTION_TILE_CONNECT"
+        const val EXTRA_TILE_SERVER_ID = "tile_server_id"
+    }
+
     // Системный диалог "разрешить VPN" можно показать только через Activity,
     // поэтому сам этот запрос живёт здесь, а не в ConnectionManager. Успешный
     // ответ просто повторяет вызов ConnectionManager.connect() — второй раз
@@ -112,6 +123,7 @@ class MainActivity : ComponentActivity() {
         RoutingStore.init(applicationContext)
         GeoAssets.init(applicationContext)
         SettingsStore.init(applicationContext)
+        handleTileIntent(intent)
 
         // На 120-герцовых экранах (например, Samsung S25) окно по умолчанию
         // не всегда просит максимальную частоту обновления у системы. Раньше
@@ -158,6 +170,25 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    // Плитка вызывает getApplicationContext().startActivity(...) с
+    // FLAG_ACTIVITY_NEW_TASK - если Activity уже жива в фоне, система
+    // переиспользует её и зовёт onNewIntent(), а не onCreate() заново.
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleTileIntent(intent)
+    }
+
+    /** Разбор ACTION_TILE_CONNECT из VpnQuickTile.kt (см. companion object
+     *  выше) - молча ничего не делает на любом другом интенте (обычный
+     *  запуск из лаунчера, повторное открытие из недавних и т.д.). */
+    private fun handleTileIntent(intent: Intent?) {
+        if (intent?.action != ACTION_TILE_CONNECT) return
+        val serverID = intent.getStringExtra(EXTRA_TILE_SERVER_ID) ?: return
+        val server = ServerStore.servers.value.firstOrNull { it.id == serverID } ?: return
+        requestToggle(server)
     }
 }
 

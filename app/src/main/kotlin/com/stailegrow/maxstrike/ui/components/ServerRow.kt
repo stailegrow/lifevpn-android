@@ -1,6 +1,7 @@
 package com.stailegrow.maxstrike.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -220,12 +221,27 @@ fun ServerRow(
     val flag = remember(config.displayName) { extractFlag(config.displayName) }
     val title = remember(config.displayName) { extractTitle(config.displayName) }
 
+    // Раньше выбранную строку было видно только по чуть более светлой
+    // заливке (palette.card поверх прозрачного) — на некоторых темах эта
+    // разница слишком тонкая, и "какой сервер вообще выбран" не читалось
+    // с одного взгляда (то, что выбрано под кнопкой подключения, конечно,
+    // видно, но в самом списке — нет). Добавлена очень блеклая обводка
+    // акцентным цветом темы поверх заливки — сама по себе едва заметна,
+    // но вместе с заливкой уверенно выделяет строку. Только на выбранной
+    // строке (isSelected) — на остальных модификатор no-op.
+    val selectionBorder = if (isSelected) {
+        Modifier.border(width = 1.dp, color = palette.accent.copy(alpha = 0.35f), shape = shape)
+    } else {
+        Modifier
+    }
+
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
             .fillMaxWidth()
             .clip(shape)
             .background(if (isSelected) palette.card else Color.Transparent)
+            .then(selectionBorder)
             .clickable(onClick = onSelect)
             .padding(horizontal = 10.dp, vertical = 8.dp),
     ) {

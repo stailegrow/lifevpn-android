@@ -10,6 +10,7 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
+import java.net.Socket
 import com.stailegrow.maxstrike.MainActivity
 import com.stailegrow.maxstrike.core.ConnectionManager
 import com.stailegrow.maxstrike.core.L
@@ -56,7 +57,21 @@ class MaxStrikeVpnService : VpnService(), libXray.DialerController {
         // только внутри собственного TUN, наружу он никуда не резолвится.
         private const val TUN_ADDRESS_V6 = "fd00:1:fd00:1::1"
         private const val TUN_PREFIX_V6 = 64
-        private const val TUN_MTU = 1500
+        // Раньше было 1500 (полный Ethernet-размер) без запаса на
+        // инкапсуляцию: реальный путь для пакета — TUN -> gVisor-стек Xray ->
+        // VLESS/TLS/Reality-заголовки -> исходящий TCP до сервера -> сеть
+        // оператора, и у сотовых сетей путевой MTU нередко меньше 1500 ещё
+        // до всех этих надбавок. Когда пакет всё равно не влезает, IPv4 его
+        // фрагментирует, а IPv6 — нет (кидает ICMPv6 "Packet Too Big"),
+        // и насколько надёжно каждое конкретное приложение это переживает —
+        // отдельный вопрос: как раз тяжёлые единичные запросы при старте
+        // (первый конфиг/манифест игры, а не лёгкие статeful HTTP-запросы
+        // сайтов) чаще всего и упираются в эту фрагментацию. 1420 — тот же
+        // запас, что используют большинство коммерческих VPN-клиентов
+        // (WireGuard-конфиги тоже обычно на 1420), с большим запасом хватает
+        // на все заголовки нашего стека и почти никогда не срабатывает как
+        // причина проблемы, в отличие от честных 1500.
+        private const val TUN_MTU = 1420
         // Публичный резолвер по умолчанию для системного маршрута DNS —
         // не то же самое, что options.routing.remoteDNS (тот может быть
         // DoH-адресом вида "https://…/dns-query", годным для Xray, но не
@@ -65,6 +80,58 @@ class MaxStrikeVpnService : VpnService(), libXray.DialerController {
         // Второй резервный сервер — на случай если сам remoteDNS уже указывает
         // на 1.1.1.1 (тогда его нет смысла дублировать вторым слотом).
         private const val SECONDARY_FALLBACK_DNS_IP = "8.8.8.8"
+        // Третий, намеренно от другого оператора (Cloudflare/Google уже
+        // заняты выше) — как выяснилось при разборе жалобы на избирательный
+        // обрыв резолва части сайтов/приложений: DNS-запросы устройства
+        // сами туннелируются через outbound "proxy" (см. комментарий в
+        // startTunnel), то есть реально резолвятся с той же сетевой точки,
+        // что и сам VLESS-сервер. Если путь именно оттуда до одного
+        // конкретного резолвера деградирован — второго резервного сервера
+        // может не хватить, если оба уже "не в фаворе" у сети конкретного
+        // хостера. Полностью эту категорию проблем убирает только перенос
+        // резолва внутрь собственного DNS-клиента ядра (со своим ретраем и
+        // порядком серверов) — не сделано в этом раунде, чтобы не менять
+        // схему Xray-конфига без возможности собрать и проверить рантаймом;
+        // третий независимый резолвер — дешёвая частичная защита от той же
+        // категории сбоев прямо сейчас.
+        private const val TERTIARY_FALLBACK_DNS_IP = "9.9.9.9"
+
+        // Живая ссылка на поднятый сервис - единственный способ вызвать
+        // protect() (метод экземпляра VpnService) откуда-то ещё, кроме
+        // самого сервиса. Нужна PingTester'у: без неё замер задержки до
+        // любого сервера, пока VPN включён, сам утекает в TUN (см.
+        // protectSocket() ниже).
+        @Volatile
+        private var activeInstance: MaxStrikeVpnService? = null
+
+        // Правка бага "после подключения задержка до серверов в списке
+        // считается от подключенного сервера, а не от локального
+        // интернета". Причина была в том, что PingTester открывал голый
+        // Socket() без protect() - наш собственный процесс не исключён из
+        // своего же TUN (это осознанно нужно IPChecker/RoutingChecker,
+        // которым, наоборот, важно идти ЧЕРЕЗ туннель, чтобы проверить, что
+        // он реально работает), поэтому при поднятом VPN такой сокет сам
+        // уезжал в TUN, и Xray тащил его через активный VLESS-сервер как
+        // обычный relay - реально мерялось "phone -> активный сервер ->
+        // кандидат" вместо честного "phone -> кандидат". protect(socket)
+        // исключает конкретный сокет из TUN-маршрута этого сервиса - тот
+        // же механизм, что libXray.DialerController.protectFd уже
+        // использует для сокета самого ядра Xray, только вызванный прямо
+        // для сокета PingTester. Если сервис ещё не поднят (VPN выключен)
+        // - activeInstance == null, тогда функция ничего не делает и
+        // просто возвращает true: сокету и так некуда "утекать", TUN
+        // попросту не существует.
+        fun protectSocket(socket: Socket): Boolean {
+            val instance = activeInstance ?: return true
+            return try {
+                instance.protect(socket)
+            } catch (e: Exception) {
+                // protect() может кинуть исключение, если VPN-интерфейс
+                // разобрали ровно в этот момент (гонка disconnect <-> пинг)
+                // - сам замер задержки из-за этого ронять не нужно.
+                true
+            }
+        }
     }
 
     // limitedParallelism(1): CONNECT и DISCONNECT (и onRevoke) кладутся сюда
@@ -82,6 +149,11 @@ class MaxStrikeVpnService : VpnService(), libXray.DialerController {
     // gomobile переводит Go-тип int в Kotlin как Long (не Int) — сам
     // адрес protect() в Android-API остаётся Int, поэтому toInt() ниже.
     override fun protectFd(fd: Long): Boolean = protect(fd.toInt())
+
+    override fun onCreate() {
+        super.onCreate()
+        activeInstance = this
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -142,6 +214,8 @@ class MaxStrikeVpnService : VpnService(), libXray.DialerController {
             // одного, addDnsServer() можно вызывать несколько раз.
             val primaryDnsIP = dnsServerHost(routing.remoteDNS) ?: FALLBACK_DNS_IP
             val secondaryDnsIP = FALLBACK_DNS_IP.takeIf { it != primaryDnsIP } ?: SECONDARY_FALLBACK_DNS_IP
+            val tertiaryDnsIP = TERTIARY_FALLBACK_DNS_IP
+                .takeIf { it != primaryDnsIP && it != secondaryDnsIP }
 
             val builder = Builder()
                 .setSession("Max Strike")
@@ -151,6 +225,7 @@ class MaxStrikeVpnService : VpnService(), libXray.DialerController {
                 .addRoute("::", 0)
                 .addDnsServer(primaryDnsIP)
                 .addDnsServer(secondaryDnsIP)
+                .apply { tertiaryDnsIP?.let { addDnsServer(it) } }
                 .setMtu(TUN_MTU)
 
             // Раздельное туннелирование: приложения из списка исключений не
@@ -243,6 +318,7 @@ class MaxStrikeVpnService : VpnService(), libXray.DialerController {
     }
 
     override fun onDestroy() {
+        if (activeInstance === this) activeInstance = null
         teardown()
         super.onDestroy()
     }

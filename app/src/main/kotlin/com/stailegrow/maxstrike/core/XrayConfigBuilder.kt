@@ -118,11 +118,35 @@ object XrayConfigBuilder {
     // падает с "netlinkrib: permission denied". Поймано на реальном
     // запуске на телефоне — значение конкретного имени роли не играет,
     // лишь бы было непустым.
-    private fun tunInbound(mtu: Int): JSONObject =
-        JSONObject()
+    private fun tunInbound(mtu: Int): JSONObject {
+        // БАГ, найденный при разборе жалобы "с включённым VPN не запускается
+        // конкретная игра, хотя весь остальной трафик работает": у
+        // TUN-инбаунда раньше вообще не было sniffing. Без него движок видит
+        // только голый IP-пакет назначения — а все доменные правила ниже в
+        // routing() (geosite:*, proxySites/directSites/blockSites, свои
+        // домены "напрямую" из настроек) matchятся именно по домену. Сам
+        // DNS-запрос устройства тут не помогает: он идёт прозрачным
+        // UDP-пакетом через outbound "proxy" (см. комментарий в
+        // MaxStrikeVpnService.startTunnel), а не через внутренний
+        // DNS-клиент ядра — то есть Xray никогда не строит связку
+        // IP→домен для TUN-трафика сам. Итог: все доменные правила были
+        // мёртвым кодом именно на Android, реально работали только
+        // IP-правила (geoip:private/direct, обход локальной сети). Sniffing
+        // по TLS SNI/HTTP Host/QUIC даёт движку домен прямо из потока, без
+        // необходимости в DNS-ассоциации — то же самое уже стоит у
+        // локальных socks/http-инбаундов чуть выше (тестовый путь), просто
+        // забыли добавить сюда при переносе на Android TUN.
+        val sniffing = JSONObject()
+            .put("enabled", true)
+            .put("destOverride", JSONArray(listOf("http", "tls", "quic")))
+            .put("routeOnly", false)
+
+        return JSONObject()
             .put("tag", "tun-in")
             .put("protocol", "tun")
             .put("settings", JSONObject().put("mtu", mtu).put("name", "tun0"))
+            .put("sniffing", sniffing)
+    }
 
     private fun directOutbound(): JSONObject =
         JSONObject().put("tag", "direct").put("protocol", "freedom")
@@ -191,6 +215,34 @@ object XrayConfigBuilder {
                     .put("outboundTag", "direct"),
             )
         }
+
+        // Вторая найденная причина того же симптома ("с VPN не запускается
+        // конкретная игра/приложение, хотя остальное работает как обычно",
+        // воспроизводилось одинаково на обоих пресетах — то есть дело не в
+        // доменных правилах выше). Наш прокси всегда TCP-based (VLESS поверх
+        // TCP/WS/gRPC/XHTTP — см. Transport, ни один из вариантов не UDP), а
+        // сквозь TUN на общих основаниях пытается прорваться и произвольный
+        // UDP-трафик приложений, включая QUIC/HTTP3 (порт 443/udp) — его
+        // используют многие Google-сервисы и игровые SDK (Firebase, Cronet)
+        // как основной вариант. Ретрансляция такого UDP поверх TCP-туннеля
+        // технически работает, но заметно менее надёжна, чем прямой UDP;
+        // когда именно этот путь подвисает, клиентский сетевой стек не
+        // всегда быстро и грациозно откатывается на обычный TLS-по-TCP —
+        // вместо этого приложение просто зависает на попытке достучаться,
+        // не давая пользователю никакой ошибки. Большинство крупных
+        // коммерческих VPN-клиентов такой трафик либо не поддерживают
+        // вовсе, либо намеренно глушат ради этого отката — этим и
+        // объясняется разница в поведении с другими VPN. Блокируем исходящий
+        // QUIC (udp/443) явно и заранее (до всех доменных правил ниже):
+        // браузеры и подавляющее большинство приложений откатываются на
+        // HTTP/2 поверх TCP прозрачно и без потери функциональности, а вот
+        // зависания конкретных приложений под VPN это должно снять.
+        rules.put(
+            JSONObject().put("type", "field")
+                .put("network", "udp")
+                .put("port", "443")
+                .put("outboundTag", "block"),
+        )
 
         appendRule(rules, config.blockSites, config.blockIP, "block")
         appendRule(rules, config.effectiveDirectDomains, emptyList(), "direct")

@@ -98,6 +98,28 @@ object GeoAssets {
         }
     }
 
+    /** Версия 2.2.0: по прямой просьбе пользователя базы теперь обновляются
+     *  на КАЖДОМ запуске приложения, безусловно — не только когда прошло
+     *  REFRESH_INTERVAL_MS (см. refreshIfStaleBlocking выше) и не только
+     *  если ВЫБРАННЫЙ В ДАННЫЙ МОМЕНТ пресет needsGeoAssets. Раньше можно
+     *  было месяцами сидеть на "Глобально" с ни разу не обновлёнными
+     *  правилами и получить устаревшие данные сразу при переключении на
+     *  "Обход РФ", не дожидаясь TTL. Вызывается из
+     *  MaxStrikeApplication.onCreate() — самой ранней и единственной
+     *  гарантированно проходимой точки старта процесса (см. комментарий
+     *  класса), так что срабатывает даже если систему поднял
+     *  MaxStrikeVpnService напрямую, без MainActivity. Тихо — по той же
+     *  причине, что и выше: ошибку показывать некому, а оборванная закачка
+     *  не портит уже рабочую базу (fetch() пишет через временный файл).
+     *  Звать только с Dispatchers.IO. */
+    fun refreshOnLaunchBlocking(geositeURL: String = DEFAULT_GEOSITE_URL, geoipURL: String = DEFAULT_GEOIP_URL) {
+        try {
+            downloadBlocking(geositeURL, geoipURL)
+        } catch (e: Exception) {
+            // Тихо — тот же повод, что и у refreshIfStaleBlocking.
+        }
+    }
+
     /** Блокирующий вызов — звать только с Dispatchers.IO. */
     fun downloadBlocking(geositeURL: String, geoipURL: String) {
         val d = dir ?: throw FetchException(L.t("GeoAssets не инициализирован.", "GeoAssets not initialized."))
