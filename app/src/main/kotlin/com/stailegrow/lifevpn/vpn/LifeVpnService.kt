@@ -14,6 +14,7 @@ import java.net.Socket
 import com.stailegrow.lifevpn.MainActivity
 import com.stailegrow.lifevpn.core.ConnectionManager
 import com.stailegrow.lifevpn.core.RoutingLog
+import com.stailegrow.lifevpn.core.SessionTraffic
 import com.stailegrow.lifevpn.core.L
 import com.stailegrow.lifevpn.core.GeoAssets
 import com.stailegrow.lifevpn.core.IPChecker
@@ -262,12 +263,15 @@ class LifeVpnService : VpnService(), libXray.DialerController {
             // просто нет geosite:/geoip: правил, которым он был бы нужен:
             // ConnectionManager.resolveRouting() уже проверил это раньше,
             // чем стартовал сервис).
+            val metricsPort = SessionTraffic.freePort()
+            SessionTraffic.reset(metricsPort)
             val options = XrayConfigBuilder.Options(
                 routing = routing,
                 tunFileDescriptor = iface.fd,
                 tunMtu = TUN_MTU,
                 geoAssetsDir = GeoAssets.dirPath(),
                 accessLogPath = RoutingLog.file(this).absolutePath,
+                metricsPort = metricsPort,
             )
             RoutingLog.reset(this)
             XrayCoreBridge.runXray(XrayConfigBuilder.makeJSON(server, options))
@@ -295,6 +299,7 @@ class LifeVpnService : VpnService(), libXray.DialerController {
             startForeground(NOTIFICATION_ID, buildNotification(server, connecting = false))
             ConnectionManager.reportConnected(ip)
             RoutingLog.begin(this)
+            SessionTraffic.start()
         } catch (e: Exception) {
             teardown()
             ConnectionManager.reportFailed(e.message ?: L.t("Не удалось поднять туннель.", "Could not bring up the tunnel."))
@@ -310,6 +315,7 @@ class LifeVpnService : VpnService(), libXray.DialerController {
 
     private fun teardown() {
         RoutingLog.end()
+        SessionTraffic.stop()
         if (coreRunning) {
             runCatching { XrayCoreBridge.stopXray() }
             runCatching { XrayCoreBridge.resetDNS() }

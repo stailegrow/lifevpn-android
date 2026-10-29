@@ -14,11 +14,12 @@ import com.stailegrow.lifevpn.core.ServerStore
 import com.stailegrow.lifevpn.ui.components.LatencyCard
 import com.stailegrow.lifevpn.ui.components.RoutingLogCard
 import com.stailegrow.lifevpn.ui.components.SpeedCard
+import com.stailegrow.lifevpn.ui.components.TrafficCard
 import kotlinx.coroutines.delay
 
 /**
- * «Статистика» — как в macOS-версии: замер скорости, история задержки по
- * всем узлам и журнал маршрутизации. Пока вкладка открыта, задержка
+ * «Статистика» — как в macOS-версии: замер скорости, трафик, история
+ * задержки по всем узлам и журнал маршрутизации. Пока вкладка открыта, задержка
  * опрашивается раз в 10 секунд (тот же лёгкий режим, что на «Серверах»).
  */
 @Composable
@@ -39,6 +40,7 @@ fun StatsScreen(modifier: Modifier = Modifier) {
         contentPadding = PaddingValues(top = 4.dp, bottom = 24.dp),
     ) {
         item(key = "speed") { SpeedCard() }
+        item(key = "traffic") { TrafficCard() }
         if (servers.isNotEmpty()) {
             item(key = "latency") { LatencyCard(servers = servers, pingHistory = pingHistory) }
         }
