@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Диагональный градиент фона адаптивной иконки Life VPN — те же
+     акцентные цвета (голубой -> лавандовый), что и в плоских иконках
+     для до-26 устройств (см. gen_icon.py), только векторно, без растра. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <gradient
+        android:type="linear"
+        android:angle="315"
+        android:startColor="#6FB2EA"
+        android:endColor="#A78BF0" />
+</shape>

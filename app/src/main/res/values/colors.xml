@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Фолбэк-цвет фона иконки (сама адаптивная иконка теперь берёт
+         градиент из drawable/ic_launcher_background.xml) — капля со
+         значком питания в drawable-xxxhdpi/ic_launcher_foreground.png,
+         сгенерирована в стиле кнопки подключения Life VPN 2.0. -->
+    <color name="ic_launcher_background">#6FB2EA</color>
+</resources>

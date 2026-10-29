@@ -1,0 +1,32 @@
+# Gradle
+.gradle/
+build/
+app/build/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Local config (per-machine SDK path — никогда не коммитим)
+local.properties
+
+# Keystores
+*.jks
+*.keystore
+
+# Нативная библиотека ядра — собирается Scripts/build-libxray.sh, в
+# репозитории ей не место (как xray/geoip.dat/geosite.dat в macOS-проекте)
+app/libs/*.aar
+app/libs/*.jar
+!app/libs/.gitkeep
+
+# Ключ подписи релиза и пароли к нему — см. keystore/release.keystore
+keystore.properties
+
+# Мусор от старого macOS-прототипа (см. историю проекта) — удалён из
+# трекинга, папку больше не коммитим.
+_macos-prototype-unused/

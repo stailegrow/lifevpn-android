@@ -1,0 +1,97 @@
+# Публикация релиза Android-версии.
+#
+# APK собирается и подписывается вне GitHub (ключ подписи в репозиторий не
+# попадает). В коммит релиза кладутся сам APK и описание в .github/publish/.
+# Этот workflow создаёт из них релиз v<versionName>, а затем убирает APK из
+# истории: заменяет отправленные коммиты одним коммитом без папки publish,
+# чтобы 70 МБ бинарника не оседали в репозитории навсегда.
+#
+# Если рядом лежит маркер .github/PURGE_HISTORY, история пересобирается с
+# нуля (один коммит), а все прежние релизы и метки удаляются.
+name: Публикация релиза
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Есть ли что публиковать
+        id: check
+        run: |
+          APK=$(ls .github/publish/*.apk 2>/dev/null | head -1 || true)
+          if [ -z "$APK" ]; then
+            echo "Нет APK в .github/publish — публиковать нечего."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          VERSION=$(sed -n 's/^ *versionName = "\(.*\)"/\1/p' app/build.gradle.kts | head -1)
+          [ -n "$VERSION" ] || { echo "Не нашёл versionName"; exit 1; }
+          echo "apk=$APK" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Создать релиз
+        if: steps.check.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
+          APK: ${{ steps.check.outputs.apk }}
+        run: |
+          TAG="v${VERSION}"
+          NAME="LifeVPN-${VERSION}.apk"
+          cp "$APK" "$RUNNER_TEMP/$NAME"
+          NOTES=.github/publish/notes.md
+          [ -f "$NOTES" ] || { echo "Life VPN ${VERSION}" > "$RUNNER_TEMP/notes.md"; NOTES="$RUNNER_TEMP/notes.md"; }
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$RUNNER_TEMP/$NAME" --clobber
+          else
+            gh release create "$TAG" "$RUNNER_TEMP/$NAME" \
+              --title "Life VPN ${VERSION}" --notes-file "$NOTES" --target "$GITHUB_SHA" --latest
+          fi
+
+      - name: Убрать APK из истории
+        if: steps.check.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          git config user.name "stailegrow"
+          git config user.email "stailegrow@users.noreply.github.com"
+          MESSAGE=$(git log -1 --format=%B)
+          PURGE=false
+          [ -f .github/PURGE_HISTORY ] && PURGE=true
+          git rm -r -q --cached .github/publish
+          [ "$PURGE" = true ] && git rm -q --cached .github/PURGE_HISTORY
+          TREE=$(git write-tree)
+          if [ "$PURGE" = true ] || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            COMMIT=$(printf '%s\n' "$MESSAGE" | git commit-tree "$TREE")
+          else
+            COMMIT=$(printf '%s\n' "$MESSAGE" | git commit-tree "$TREE" -p "$BEFORE")
+          fi
+          git push --force origin "$COMMIT:refs/heads/main"
+          # Метка релиза должна указывать на коммит, который остался в истории.
+          git push --force origin "$COMMIT:refs/tags/v${VERSION}"
+
+          if [ "$PURGE" = true ]; then
+            for tag in $(gh release list --limit 100 --json tagName --jq '.[].tagName'); do
+              [ "$tag" = "v${VERSION}" ] || gh release delete "$tag" --yes --cleanup-tag
+            done
+            for tag in $(git ls-remote --tags origin | sed 's#.*refs/tags/##; s#\^{}##' | sort -u); do
+              [ "$tag" = "v${VERSION}" ] || git push origin ":refs/tags/$tag" || true
+            done
+          fi
