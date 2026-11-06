@@ -20,6 +20,8 @@ object LinkParser {
             ParseException("В ссылке нет адреса сервера.")
         object MissingPort :
             ParseException("В ссылке нет порта.")
+        class UnsupportedSecurity(val value: String) :
+            ParseException("Неизвестный тип защиты «$value» — узел пропущен, чтобы не подключаться без шифрования.")
     }
 
     data class ParseResult(val configs: List<ProxyConfig>, val errors: List<String>)
@@ -71,7 +73,8 @@ object LinkParser {
             userID = user,
             encryption = query["encryption"] ?: "none",
             flow = nonEmpty(query["flow"]),
-            security = Security.fromRaw(query["security"]?.lowercase()),
+            security = Security.fromLink(query["security"])
+                ?: throw ParseException.UnsupportedSecurity(query["security"].orEmpty().take(32)),
             transport = Transport.fromRaw(normalizedTransport(query)),
             sni = nonEmpty(query["sni"]) ?: nonEmpty(query["peer"]),
             fingerprint = nonEmpty(query["fp"]),

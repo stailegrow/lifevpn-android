@@ -40,22 +40,40 @@ object IPChecker {
     // т.п.) — такой текст не должен приниматься как настоящий внешний IP.
     private val IP_SHAPE = Regex("^[0-9a-fA-F.:]{3,45}$")
 
-    fun externalIPBlocking(timeoutMs: Int = 6000): String? {
+    fun externalIPBlocking(timeoutMs: Int = 6000, checkActive: () -> Unit = {}): String? {
         for (endpoint in ENDPOINTS) {
+            checkActive()
             val ip = tryEndpoint(endpoint, timeoutMs)
             if (ip != null) return ip
         }
         return null
     }
 
-    private fun tryEndpoint(endpoint: String, timeoutMs: Int): String? = try {
-        val connection = URL(endpoint).openConnection() as HttpURLConnection
-        connection.connectTimeout = timeoutMs
-        connection.readTimeout = timeoutMs
-        connection.setRequestProperty("User-Agent", USER_AGENT)
-        val body = connection.inputStream.bufferedReader().use { it.readText() }.trim()
-        body.takeIf { it.isNotEmpty() && IP_SHAPE.matches(it) }
-    } catch (e: Exception) {
-        null
+    private fun tryEndpoint(endpoint: String, timeoutMs: Int): String? {
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = URL(endpoint).openConnection() as HttpURLConnection
+            connection.connectTimeout = timeoutMs
+            connection.readTimeout = timeoutMs
+            connection.setRequestProperty("User-Agent", USER_AGENT)
+            // An IP address is tiny; never buffer an arbitrary server response.
+            val bytes = connection.inputStream.use { input ->
+                val buffer = ByteArray(128)
+                var count = 0
+                while (count < buffer.size) {
+                    val read = input.read(buffer, count, buffer.size - count)
+                    if (read < 0) break
+                    count += read
+                }
+                if (count == buffer.size) return null
+                buffer.copyOf(count)
+            }
+            val body = bytes.toString(Charsets.UTF_8).trim()
+            body.takeIf { it.isNotEmpty() && IP_SHAPE.matches(it) }
+        } catch (e: Exception) {
+            null
+        } finally {
+            connection?.disconnect()
+        }
     }
 }

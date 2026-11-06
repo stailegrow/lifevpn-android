@@ -72,6 +72,9 @@ fun HomeScreen(onToggle: (ProxyConfig) -> Unit, modifier: Modifier = Modifier) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
         contentPadding = PaddingValues(top = 4.dp, bottom = 24.dp),
     ) {
+        // Новая версия — первым делом, ещё до кнопки подключения.
+        item(key = "update") { UpdateBanner() }
+
         item(key = "slab") {
             ConnectSlab(
                 state = state,
@@ -82,8 +85,6 @@ fun HomeScreen(onToggle: (ProxyConfig) -> Unit, modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxWidth(),
             )
         }
-
-        item(key = "update") { UpdateBanner() }
 
         routingNotice?.let { notice ->
             item(key = "notice") {

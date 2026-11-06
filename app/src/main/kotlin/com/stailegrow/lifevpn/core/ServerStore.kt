@@ -206,7 +206,18 @@ object ServerStore {
 
             try {
                 val payload = withContext(Dispatchers.IO) { SubscriptionFetcher.fetch(stored.url) }
-                val parsed = LinkParser.parseMany(payload.links.joinToString("\n")).configs
+                // Пока шла загрузка, подписку могли удалить — её узлы не возвращаем.
+                if (_subscriptions.value.none { it.id == stored.id }) return false
+                val parsedResult = LinkParser.parseMany(payload.links.joinToString("\n"))
+                val parsed = parsedResult.configs
+                // Ни одна ссылка не распозналась — ошибка, а не пустая подписка:
+                // прежние узлы сохраняем.
+                if (parsed.isEmpty()) {
+                    throw SubscriptionFetcher.FetchException(
+                        parsedResult.errors.firstOrNull()
+                            ?: L.t("Ссылки подписки не распознались — прежние узлы сохранены.", "The subscription links were not recognised — existing nodes are kept."),
+                    )
+                }
 
                 val result = merge(existing = _servers.value, fetched = parsed, subscriptionID = stored.id)
                 _servers.value = result.servers
@@ -228,6 +239,8 @@ object ServerStore {
                 if (_selectedID.value == null || _servers.value.none { it.id == _selectedID.value }) {
                     _selectedID.value = _servers.value.firstOrNull()?.id
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 stored = stored.copy(lastError = e.message ?: L.t("Не удалось загрузить подписку.", "Could not load the subscription."))
             }

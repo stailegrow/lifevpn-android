@@ -44,6 +44,11 @@ fun StatsScreen(modifier: Modifier = Modifier) {
         if (servers.isNotEmpty()) {
             item(key = "latency") { LatencyCard(servers = servers, pingHistory = pingHistory) }
         }
-        item(key = "routing") { RoutingLogCard() }
     }
+}
+
+/** «Журнал» — отдельная вкладка: журнал маршрутизации на весь экран. */
+@Composable
+fun LogsScreen(modifier: Modifier = Modifier) {
+    RoutingLogCard(modifier = modifier.fillMaxSize())
 }

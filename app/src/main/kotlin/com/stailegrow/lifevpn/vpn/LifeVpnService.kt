@@ -26,6 +26,11 @@ import com.stailegrow.lifevpn.model.RoutingConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -44,6 +49,7 @@ class LifeVpnService : VpnService(), libXray.DialerController {
     companion object {
         const val ACTION_CONNECT = "com.stailegrow.lifevpn.vpn.CONNECT"
         const val ACTION_DISCONNECT = "com.stailegrow.lifevpn.vpn.DISCONNECT"
+        const val EXTRA_REQUEST = "request"
         const val EXTRA_SERVER = "server"
         const val EXTRA_ROUTING = "routing"
 
@@ -136,15 +142,12 @@ class LifeVpnService : VpnService(), libXray.DialerController {
         }
     }
 
-    // limitedParallelism(1): CONNECT и DISCONNECT (и onRevoke) кладутся сюда
-    // независимыми launch{} — на обычном Dispatchers.IO это пул потоков, и
-    // ничего не гарантирует, что стартующий startTunnel() и параллельно
-    // пришедший stopTunnel() не выполнятся на разных потоках одновременно
-    // (гонка за tunInterface/coreRunning, самый частый триггер — быстрый
-    // повторный тап или переключение сервера во время подключения).
-    // limitedParallelism(1) превращает Dispatchers.IO в очередь: следующий
-    // launch не начнётся, пока не закончится (или не приостановится) текущий.
-    private val scope = CoroutineScope(Dispatchers.IO.limitedParallelism(1) + Job())
+    // Native/TUN mutations share a lock with revoke/destroy. Suspending or
+    // blocking probes run outside it and cannot publish an obsolete result.
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val lifecycle = TunnelLifecycle()
+    private var connectionJob: Job? = null
+    private var activeRequest: Long? = null
     private var tunInterface: ParcelFileDescriptor? = null
     private var coreRunning = false
 
@@ -160,135 +163,151 @@ class LifeVpnService : VpnService(), libXray.DialerController {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_CONNECT -> {
+                val request = intent.getLongExtra(EXTRA_REQUEST, -1)
+                if (!ConnectionManager.isCurrentRequest(request)) return START_NOT_STICKY
+                activeRequest = request
+                val generation = lifecycle.advance()
+                connectionJob?.cancel()
                 @Suppress("DEPRECATION")
                 val server = intent.getSerializableExtra(EXTRA_SERVER) as? ProxyConfig
                 @Suppress("DEPRECATION")
                 val routing = intent.getSerializableExtra(EXTRA_ROUTING) as? RoutingConfig
                 if (server == null || routing == null) {
-                    ConnectionManager.reportFailed(L.t("Сервис получил пустой конфиг — это баг, а не сеть.", "The service received an empty config — that's a bug, not a network issue."))
-                    stopSelf()
+                    lifecycle.runIfCurrent(generation) {
+                        teardown()
+                        ConnectionManager.reportFailed(L.t("Сервис получил пустой конфиг.", "The service received an empty config."), request)
+                        stopSelfResult(startId)
+                    }
                 } else {
-                    scope.launch { startTunnel(server, routing) }
+                    connectionJob = scope.launch { startTunnel(server, routing, generation, startId, request) }
                 }
             }
-
-            ACTION_DISCONNECT -> scope.launch { stopTunnel() }
+            ACTION_DISCONNECT -> {
+                val request = intent.getLongExtra(EXTRA_REQUEST, -1).takeIf { it >= 0 }
+                stopTunnel(startId, request)
+            }
         }
         return START_NOT_STICKY
     }
 
-    private suspend fun startTunnel(server: ProxyConfig, routing: RoutingConfig) {
+    private suspend fun startTunnel(server: ProxyConfig, routing: RoutingConfig, generation: Long, startId: Int, request: Long) {
         try {
-            // startForeground() — самым первым делом, ещё до establish()/ядра/сетевой
-            // проверки IP: те шаги могут суммарно занять несколько секунд на медленной
-            // сети, а пока startForeground() не вызван, сервис не защищён системой как
-            // foreground и рискует быть убит агрессивной прошивкой в этом окне.
-            // Уведомление обновится на "подключено" ниже, как только тоннель реально
-            // заработает (внешний IP получен).
-            startForeground(NOTIFICATION_ID, buildNotification(server, connecting = true))
-
-            // Переключение сервера "на лету": ACTION_CONNECT может прийти, пока
-            // предыдущий туннель ещё поднят (тот же путь тапа, что и обычное
-            // подключение, — UI не шлёт ACTION_DISCONNECT перед сменой сервера).
-            // Без явного teardown() тут builder.establish() ниже тихо подменил
-            // бы TUN у системы, а старый ParcelFileDescriptor и старое ядро
-            // остались бы висеть — утечка дескриптора и два работающих ядра
-            // разом. teardown() безопасен и когда ничего не поднято (coreRunning
-            // == false, tunInterface == null) — тогда это просто no-op.
-            teardown()
-
-            // Системный DNS-сервер для VPN-интерфейса (тот, который видят
-            // ВСЕ приложения на телефоне, не только сам Xray) — их обычные
-            // DNS-запросы (UDP:53) идут как любой другой пакет через TUN и
-            // маршрутизируются Xray-core как обычный трафик: для него нет
-            // отдельного правила, так что по умолчанию он тоже туннелируется
-            // через outbound "proxy" — то есть реально долетает до сервера
-            // (Netherlands/Finland/...) и обратно. Если только ОДИН такой
-            // сервер задан и путь до него временно барахлит (типичная история
-            // для транзита конкретных UDP-пакетов через конкретный впс), у
-            // системного резолвера нет к кому обратиться ещё — избирательный
-            // обрыв резолва части сайтов ровно с таким поведением, что и
-            // описал пользователь: то есть сайты, то нет, помогает
-            // переподключение (свежая сессия), не помогает смена пресета
-            // маршрутизации (оба используют один и тот же единственный
-            // системный DNS-сервер). Задаём второй сервер как резерв — Android
-            // сам умеет перебирать несколько DNS-серверов интерфейса при сбое
-            // одного, addDnsServer() можно вызывать несколько раз.
-            val primaryDnsIP = dnsServerHost(routing.remoteDNS) ?: FALLBACK_DNS_IP
-            val secondaryDnsIP = FALLBACK_DNS_IP.takeIf { it != primaryDnsIP } ?: SECONDARY_FALLBACK_DNS_IP
-            val tertiaryDnsIP = TERTIARY_FALLBACK_DNS_IP
-                .takeIf { it != primaryDnsIP && it != secondaryDnsIP }
-
-            val builder = Builder()
-                .setSession("Life VPN")
-                .addAddress(TUN_ADDRESS, TUN_PREFIX)
-                .addRoute("0.0.0.0", 0)
-                .addAddress(TUN_ADDRESS_V6, TUN_PREFIX_V6)
-                .addRoute("::", 0)
-                .addDnsServer(primaryDnsIP)
-                .addDnsServer(secondaryDnsIP)
-                .apply { tertiaryDnsIP?.let { addDnsServer(it) } }
-                .setMtu(TUN_MTU)
-
-            // Раздельное туннелирование: приложения из списка исключений не
-            // видят TUN вообще, их трафик идёт мимо VPN напрямую. Если
-            // пакет успели удалить с телефона — addDisallowedApplication
-            // кидает NameNotFoundException, просто пропускаем его и не
-            // валим всё подключение из-за одного отсутствующего пакета.
-            for (pkg in SettingsStore.excludedApps.value) {
-                try {
-                    builder.addDisallowedApplication(pkg)
-                } catch (e: PackageManager.NameNotFoundException) {
-                    // пропускаем — приложения уже нет на устройстве
+            if (!lifecycle.runIfCurrent(generation) {
+                // startForeground() — самым первым делом, ещё до establish()/ядра/сетевой
+                // проверки IP: те шаги могут суммарно занять несколько секунд на медленной
+                // сети, а пока startForeground() не вызван, сервис не защищён системой как
+                // foreground и рискует быть убит агрессивной прошивкой в этом окне.
+                // Уведомление обновится на "подключено" ниже, как только тоннель реально
+                // заработает (внешний IP получен).
+                startForeground(NOTIFICATION_ID, buildNotification(server, connecting = true))
+    
+                // Переключение сервера "на лету": ACTION_CONNECT может прийти, пока
+                // предыдущий туннель ещё поднят (тот же путь тапа, что и обычное
+                // подключение, — UI не шлёт ACTION_DISCONNECT перед сменой сервера).
+                // Без явного teardown() тут builder.establish() ниже тихо подменил
+                // бы TUN у системы, а старый ParcelFileDescriptor и старое ядро
+                // остались бы висеть — утечка дескриптора и два работающих ядра
+                // разом. teardown() безопасен и когда ничего не поднято (coreRunning
+                // == false, tunInterface == null) — тогда это просто no-op.
+                teardown(removeForeground = false)
+    
+                // Системный DNS-сервер для VPN-интерфейса (тот, который видят
+                // ВСЕ приложения на телефоне, не только сам Xray) — их обычные
+                // DNS-запросы (UDP:53) идут как любой другой пакет через TUN и
+                // маршрутизируются Xray-core как обычный трафик: для него нет
+                // отдельного правила, так что по умолчанию он тоже туннелируется
+                // через outbound "proxy" — то есть реально долетает до сервера
+                // (Netherlands/Finland/...) и обратно. Если только ОДИН такой
+                // сервер задан и путь до него временно барахлит (типичная история
+                // для транзита конкретных UDP-пакетов через конкретный впс), у
+                // системного резолвера нет к кому обратиться ещё — избирательный
+                // обрыв резолва части сайтов ровно с таким поведением, что и
+                // описал пользователь: то есть сайты, то нет, помогает
+                // переподключение (свежая сессия), не помогает смена пресета
+                // маршрутизации (оба используют один и тот же единственный
+                // системный DNS-сервер). Задаём второй сервер как резерв — Android
+                // сам умеет перебирать несколько DNS-серверов интерфейса при сбое
+                // одного, addDnsServer() можно вызывать несколько раз.
+                val primaryDnsIP = dnsServerHost(routing.remoteDNS) ?: FALLBACK_DNS_IP
+                val secondaryDnsIP = FALLBACK_DNS_IP.takeIf { it != primaryDnsIP } ?: SECONDARY_FALLBACK_DNS_IP
+                val tertiaryDnsIP = TERTIARY_FALLBACK_DNS_IP
+                    .takeIf { it != primaryDnsIP && it != secondaryDnsIP }
+    
+                val builder = Builder()
+                    .setSession("Life VPN")
+                    .addAddress(TUN_ADDRESS, TUN_PREFIX)
+                    .addRoute("0.0.0.0", 0)
+                    .addAddress(TUN_ADDRESS_V6, TUN_PREFIX_V6)
+                    .addRoute("::", 0)
+                    .addDnsServer(primaryDnsIP)
+                    .addDnsServer(secondaryDnsIP)
+                    .apply { tertiaryDnsIP?.let { addDnsServer(it) } }
+                    .setMtu(TUN_MTU)
+    
+                // Раздельное туннелирование: приложения из списка исключений не
+                // видят TUN вообще, их трафик идёт мимо VPN напрямую. Если
+                // пакет успели удалить с телефона — addDisallowedApplication
+                // кидает NameNotFoundException, просто пропускаем его и не
+                // валим всё подключение из-за одного отсутствующего пакета.
+                for (pkg in SettingsStore.excludedApps.value) {
+                    try {
+                        builder.addDisallowedApplication(pkg)
+                    } catch (e: PackageManager.NameNotFoundException) {
+                        // пропускаем — приложения уже нет на устройстве
+                    }
                 }
-            }
-
-            val iface = builder.establish()
-                ?: throw IllegalStateException(
-                    L.t(
-                        "Android не выдал TUN-интерфейс (establish() вернул null) — " +
-                            "разрешение на VPN не выдано или его отозвали.",
-                        "Android did not provide a TUN interface (establish() returned null) — " +
-                            "the VPN permission was not granted or was revoked.",
-                    ),
+    
+                val iface = builder.establish()
+                    ?: throw IllegalStateException(
+                        L.t(
+                            "Android не выдал TUN-интерфейс (establish() вернул null) — " +
+                                "разрешение на VPN не выдано или его отозвали.",
+                            "Android did not provide a TUN interface (establish() returned null) — " +
+                                "the VPN permission was not granted or was revoked.",
+                        ),
+                    )
+                tunInterface = iface
+    
+                XrayCoreBridge.registerDialerController(this)
+                XrayCoreBridge.setDNS(this, "$primaryDnsIP:53")
+    
+                // GeoAssets.init() зовёт MainActivity при старте приложения —
+                // сервис живёт в том же процессе, поэтому dirPath() тут уже
+                // готов (либо null, если этап 4 ни разу не подключался — тогда
+                // просто нет geosite:/geoip: правил, которым он был бы нужен:
+                // ConnectionManager.resolveRouting() уже проверил это раньше,
+                // чем стартовал сервис).
+                val metricsPort = SessionTraffic.freePort()
+                SessionTraffic.reset(metricsPort)
+                val options = XrayConfigBuilder.Options(
+                    routing = routing,
+                    tunFileDescriptor = iface.fd,
+                    tunMtu = TUN_MTU,
+                    geoAssetsDir = GeoAssets.dirPath(),
+                    accessLogPath = RoutingLog.file(this).absolutePath,
+                    metricsPort = metricsPort,
                 )
-            tunInterface = iface
-
-            XrayCoreBridge.registerDialerController(this)
-            XrayCoreBridge.setDNS(this, "$primaryDnsIP:53")
-
-            // GeoAssets.init() зовёт MainActivity при старте приложения —
-            // сервис живёт в том же процессе, поэтому dirPath() тут уже
-            // готов (либо null, если этап 4 ни разу не подключался — тогда
-            // просто нет geosite:/geoip: правил, которым он был бы нужен:
-            // ConnectionManager.resolveRouting() уже проверил это раньше,
-            // чем стартовал сервис).
-            val metricsPort = SessionTraffic.freePort()
-            SessionTraffic.reset(metricsPort)
-            val options = XrayConfigBuilder.Options(
-                routing = routing,
-                tunFileDescriptor = iface.fd,
-                tunMtu = TUN_MTU,
-                geoAssetsDir = GeoAssets.dirPath(),
-                accessLogPath = RoutingLog.file(this).absolutePath,
-                metricsPort = metricsPort,
-            )
-            RoutingLog.reset(this)
-            XrayCoreBridge.runXray(XrayConfigBuilder.makeJSON(server, options))
-            coreRunning = true
+                RoutingLog.reset(this)
+                XrayCoreBridge.runXray(XrayConfigBuilder.makeJSON(server, options))
+                coreRunning = true
+            }) return
 
             // Ядро с битым конфигом падает почти сразу — даём ему шанс и
             // проверяем, что оно правда поднялось (тот же приём, что и в
             // macOS-версии, см. Core/ConnectionManager.swift).
             delay(700)
-            if (!XrayCoreBridge.isRunning()) {
-                throw IllegalStateException(L.t("Ядро запустилось и сразу остановилось — конфиг или сервер невалидны.", "The core started and immediately stopped — the config or server is invalid."))
-            }
+            currentCoroutineContext().ensureActive()
+            if (!lifecycle.runIfCurrent(generation) {
+                check(XrayCoreBridge.isRunning()) {
+                    L.t("Ядро запустилось и сразу остановилось — конфиг или сервер невалидны.", "The core started and immediately stopped — the config or server is invalid.")
+                }
+            }) return
 
             // Наш процесс не исключён из VPN-маршрута, так что этот запрос
             // тоже идёт через TUN — если он прошёл, туннель реально работает,
             // а не просто "ядро запущено".
-            val ip = IPChecker.externalIPBlocking()
+            val context = currentCoroutineContext()
+            val ip = IPChecker.externalIPBlocking { context.ensureActive() }
                 ?: throw IllegalStateException(
                     L.t(
                         "Ядро запустилось, но трафик через туннель не идёт — внешний IP получить не удалось.",
@@ -296,24 +315,42 @@ class LifeVpnService : VpnService(), libXray.DialerController {
                     ),
                 )
 
-            startForeground(NOTIFICATION_ID, buildNotification(server, connecting = false))
-            ConnectionManager.reportConnected(ip)
-            RoutingLog.begin(this)
-            SessionTraffic.start()
+            currentCoroutineContext().ensureActive()
+            lifecycle.runIfCurrent(generation) {
+                startForeground(NOTIFICATION_ID, buildNotification(server, connecting = false))
+                ConnectionManager.reportConnected(ip, request)
+                RoutingLog.begin(this)
+                SessionTraffic.start()
+            }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            teardown()
-            ConnectionManager.reportFailed(e.message ?: L.t("Не удалось поднять туннель.", "Could not bring up the tunnel."))
-            stopSelf()
+            lifecycle.runIfCurrent(generation) {
+                teardown()
+                ConnectionManager.reportFailed(e.message ?: L.t("Не удалось поднять туннель.", "Could not bring up the tunnel."), request)
+                stopSelfResult(startId)
+            }
         }
     }
 
-    private suspend fun stopTunnel() {
-        teardown()
-        ConnectionManager.reportDisconnected()
-        stopSelf()
+    private fun stopTunnel(startId: Int? = null, requested: Long? = null) {
+        // UI commands are versioned when issued. A queued old disconnect
+        // must not cancel a newer preparation; notification/revoke originate here.
+        if (requested != null && !ConnectionManager.isCurrentRequest(requested)) return
+        val request = requested ?: ConnectionManager.cancelPreparation()
+        activeRequest = request
+        val generation = lifecycle.advance()
+        connectionJob?.cancel()
+        connectionJob = scope.launch {
+            lifecycle.runIfCurrent(generation) {
+                teardown()
+                ConnectionManager.reportDisconnected(request)
+                if (startId != null) stopSelfResult(startId) else stopSelf()
+            }
+        }
     }
 
-    private fun teardown() {
+    private fun teardown(removeForeground: Boolean = true) {
         RoutingLog.end()
         SessionTraffic.stop()
         if (coreRunning) {
@@ -325,19 +362,24 @@ class LifeVpnService : VpnService(), libXray.DialerController {
         tunInterface = null
         // minSdk 24 уже покрывает STOP_FOREGROUND_REMOVE (добавлен в API 24) —
         // старый stopForeground(true) не нужен, версии ниже 24 не поддерживаются.
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        if (removeForeground) stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
     override fun onDestroy() {
         if (activeInstance === this) activeInstance = null
-        teardown()
+        connectionJob?.cancel()
+        scope.cancel()
+        lifecycle.destroy {
+            teardown()
+            activeRequest?.let { ConnectionManager.reportDisconnected(it, preserveFailure = true) }
+        }
         super.onDestroy()
     }
 
     override fun onRevoke() {
         // Пользователь отозвал разрешение на VPN в системных настройках —
         // приходит без ACTION_DISCONNECT, обрабатываем так же.
-        scope.launch { stopTunnel() }
+        stopTunnel()
         super.onRevoke()
     }
 

@@ -7,6 +7,10 @@ import com.stailegrow.lifevpn.model.ProxyConfig
 import com.stailegrow.lifevpn.model.RoutingConfig
 import com.stailegrow.lifevpn.model.RoutingPreset
 import com.stailegrow.lifevpn.vpn.LifeVpnService
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -50,6 +54,16 @@ object ConnectionManager {
     // сам оставаться обычной функцией, а не suspend — вызывающие места
     // (MainActivity) остаются простыми колбэками ActivityResult.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var preparation: Job? = null
+    private val requests = java.util.concurrent.atomic.AtomicLong()
+
+    internal fun isCurrentRequest(request: Long): Boolean = requests.get() == request
+
+    internal fun cancelPreparation(): Long {
+        preparation?.cancel()
+        preparation = null
+        return requests.incrementAndGet()
+    }
 
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
@@ -79,6 +93,7 @@ object ConnectionManager {
     fun needsPermission(context: Context): Boolean = VpnService.prepare(context) != null
 
     fun connect(context: Context, server: ProxyConfig, routing: RoutingConfig = RoutingStore.current()) {
+        val request = cancelPreparation()
         if (needsPermission(context)) {
             _state.value = ConnectionState.Failed(L.t("Нет разрешения на VPN.", "No VPN permission."))
             return
@@ -90,20 +105,35 @@ object ConnectionManager {
         _state.value = ConnectionState.Connecting
 
         val appContext = context.applicationContext
-        scope.launch {
-            val resolved = resolveRouting(routing)
-            appContext.startService(
-                Intent(appContext, LifeVpnService::class.java).apply {
-                    action = LifeVpnService.ACTION_CONNECT
-                    putExtra(LifeVpnService.EXTRA_SERVER, server)
-                    putExtra(LifeVpnService.EXTRA_ROUTING, resolved)
-                },
-            )
+        preparation = scope.launch {
+            val resolved = resolveRouting(routing, request)
+            currentCoroutineContext().ensureActive()
+            if (!isCurrentRequest(request)) return@launch
+            // После долгой подготовки приложение может уже быть в фоне, и
+            // Android 8+ запретит старт сервиса — это ошибка подключения, а
+            // не падение процесса.
+            try {
+                appContext.startService(
+                    Intent(appContext, LifeVpnService::class.java).apply {
+                        action = LifeVpnService.ACTION_CONNECT
+                        putExtra(LifeVpnService.EXTRA_REQUEST, request)
+                        putExtra(LifeVpnService.EXTRA_SERVER, server)
+                        putExtra(LifeVpnService.EXTRA_ROUTING, resolved)
+                    },
+                )
+            } catch (e: IllegalStateException) {
+                if (isCurrentRequest(request)) {
+                    _state.value = ConnectionState.Failed(
+                        L.t("Android не разрешил запустить VPN в фоне — откройте приложение и подключитесь ещё раз.",
+                            "Android did not allow starting the VPN in the background — open the app and connect again."),
+                    )
+                }
+            }
         }
     }
 
     /** Возвращает правила, с которыми реально можно стартовать. */
-    private suspend fun resolveRouting(requested: RoutingConfig): RoutingConfig {
+    private suspend fun resolveRouting(requested: RoutingConfig, request: Long): RoutingConfig {
         if (!requested.needsGeoAssets || GeoAssets.isReady()) return requested
 
         return try {
@@ -114,7 +144,11 @@ object ConnectionManager {
                 )
             }
             requested
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
+            if (!isCurrentRequest(request)) throw CancellationException()
             _routingNotice.value = L.t(
                 "Базы правил не загрузились (${e.message}). " +
                     "Подключаюсь без обхода — весь трафик пойдёт через VPN.",
@@ -126,9 +160,11 @@ object ConnectionManager {
     }
 
     fun disconnect(context: Context) {
+        val request = cancelPreparation()
         context.startService(
             Intent(context, LifeVpnService::class.java).apply {
                 action = LifeVpnService.ACTION_DISCONNECT
+                putExtra(LifeVpnService.EXTRA_REQUEST, request)
             },
         )
     }
@@ -143,19 +179,23 @@ object ConnectionManager {
 
     // Дальше — только для LifeVpnService (тот же процесс). UI это не вызывает.
 
-    internal fun reportConnected(externalIP: String?) {
+    internal fun reportConnected(externalIP: String?, request: Long) = scope.launch {
+        if (!isCurrentRequest(request)) return@launch
         _externalIP.value = externalIP
         _connectedSince.value = System.currentTimeMillis()
         _state.value = ConnectionState.Connected
     }
 
-    internal fun reportFailed(message: String) {
+    internal fun reportFailed(message: String, request: Long? = null) = scope.launch {
+        if (request != null && !isCurrentRequest(request)) return@launch
         _state.value = ConnectionState.Failed(message)
         _externalIP.value = null
         _connectedSince.value = null
     }
 
-    internal fun reportDisconnected() {
+    internal fun reportDisconnected(request: Long, preserveFailure: Boolean = false) = scope.launch {
+        if (preserveFailure && _state.value is ConnectionState.Failed) return@launch
+        if (!isCurrentRequest(request)) return@launch
         _state.value = ConnectionState.Disconnected
         _activeServer.value = null
         _externalIP.value = null

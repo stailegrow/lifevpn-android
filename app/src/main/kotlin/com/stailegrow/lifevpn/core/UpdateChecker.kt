@@ -2,6 +2,8 @@ package com.stailegrow.lifevpn.core
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -76,7 +78,22 @@ object UpdateChecker {
      *  Idle: раздражать баннером на ровном месте не нужно, а как только
      *  реальная новая версия появится, эта же проверка её найдёт при
      *  следующем запуске. */
+    @Volatile private var lastAutoCheck = 0L
+
+    /** Каждое открытие приложения (onResume): проверяем снова, если с прошлой
+     *  автоматической проверки прошло больше 10 минут и обновление ещё не
+     *  найдено, — процесс на телефоне может жить днями. */
+    fun checkOnOpen() {
+        when (_state.value) {
+            is State.Checking, is State.Available, is State.Downloading, is State.ReadyToInstall -> return
+            else -> Unit
+        }
+        if (System.currentTimeMillis() - lastAutoCheck < 10 * 60 * 1000L) return
+        checkOnLaunch()
+    }
+
     fun checkOnLaunch() {
+        lastAutoCheck = System.currentTimeMillis()
         _state.value = State.Checking
         ioScope.launch {
             try {
@@ -182,7 +199,7 @@ object UpdateChecker {
                     break
                 }
             }
-            if (apkUrl == null) {
+            if (apkUrl == null || !isOwnReleaseAsset(apkUrl)) {
                 throw UpdateException(L.t("В релизе на GitHub нет прикреплённого APK.", "The GitHub release has no attached APK."))
             }
 
@@ -197,6 +214,55 @@ object UpdateChecker {
             )
         } finally {
             connection.disconnect()
+        }
+    }
+
+    /** Скачиваем только файлы релизов своего репозитория и только по https.
+     *  HttpURLConnection сам не переходит по перенаправлению со сменой
+     *  протокола (https → http), так что цепочка остаётся защищённой. */
+    internal fun isOwnReleaseAsset(url: String): Boolean = try {
+        val parsed = URL(url)
+        parsed.protocol == "https" && parsed.host == "github.com" &&
+            parsed.path.startsWith("/stailegrow/lifevpn-android/releases/download/")
+    } catch (e: Exception) {
+        false
+    }
+
+    /** Верхняя граница размера APK — защита от бесконечной загрузки. */
+    private const val MAX_APK_BYTES = 400L * 1024 * 1024
+
+    /**
+     * Проверка скачанного APK ДО запуска системного установщика: тот же
+     * пакет, более новый versionCode и тот же сертификат подписи, что
+     * закреплён в IntegrityGuard (ключ издателя). Системный установщик всё
+     * равно проверит подпись сам — это лишь раннее и понятное отклонение
+     * чужого файла, а не замена его проверки.
+     */
+    @Suppress("DEPRECATION")
+    internal fun verifyDownloadedApk(context: Context, apk: File) {
+        val pm = context.packageManager
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
+        val archive: PackageInfo = pm.getPackageArchiveInfo(apk.absolutePath, flags)
+            ?: throw UpdateException(L.t("Скачанный файл не является APK.", "The downloaded file is not an APK."))
+        if (archive.packageName != context.packageName) {
+            throw UpdateException(L.t("В скачанном APK другое приложение — обновление не установлено.", "The downloaded APK is a different app — the update was not installed."))
+        }
+        val installed = pm.getPackageInfo(context.packageName, 0)
+        val archiveCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) archive.longVersionCode else archive.versionCode.toLong()
+        val installedCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) installed.longVersionCode else installed.versionCode.toLong()
+        if (archiveCode <= installedCode) {
+            throw UpdateException(L.t("Скачанный APK не новее установленной версии.", "The downloaded APK is not newer than the installed version."))
+        }
+        val signers = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val info = archive.signingInfo ?: throw UpdateException(L.t("APK не подписан.", "The APK is not signed."))
+            // При ротации ключа допустима цепочка: в истории должен быть наш сертификат.
+            if (info.hasMultipleSigners()) info.apkContentsSigners else info.signingCertificateHistory
+        } else {
+            archive.signatures
+        }
+        val hashes = signers?.map { IntegrityGuard.sha256Hex(it.toByteArray()) }.orEmpty()
+        if (hashes.none { it.equals(IntegrityGuard.EXPECTED_SHA256, ignoreCase = true) }) {
+            throw UpdateException(L.t("APK подписан чужим ключом — обновление не установлено.", "The APK is signed with a different key — the update was not installed."))
         }
     }
 
@@ -223,11 +289,10 @@ object UpdateChecker {
      *  если сервер прислал Content-Length — не всегда, тогда прогресс
      *  просто не обновляется до самого конца. */
     private fun downloadApkBlocking(context: Context, info: UpdateInfo, onProgress: (Int) -> Unit): File {
-        val url = try {
-            URL(info.downloadUrl)
-        } catch (e: Exception) {
+        if (!isOwnReleaseAsset(info.downloadUrl)) {
             throw UpdateException(L.t("Неверная ссылка на APK.", "Invalid APK link."))
         }
+        val url = URL(info.downloadUrl)
         val connection = url.openConnection() as HttpURLConnection
         connection.connectTimeout = CONNECT_TIMEOUT_MS
         connection.readTimeout = READ_TIMEOUT_MS
@@ -258,6 +323,10 @@ object UpdateChecker {
                             if (n == -1) break
                             output.write(buffer, 0, n)
                             readBytes += n
+                            val cap = if (info.apkSizeBytes > 0) info.apkSizeBytes else MAX_APK_BYTES
+                            if (readBytes > cap) {
+                                throw java.io.IOException(L.t("файл больше, чем объявлено в релизе", "the file is larger than the release declares"))
+                            }
                             if (total > 0) {
                                 onProgress(((readBytes * 100) / total).toInt().coerceIn(0, 100))
                             }
@@ -274,6 +343,12 @@ object UpdateChecker {
                 throw UpdateException(L.t("Файл пришёл обрезанным.", "The file arrived truncated."))
             }
 
+            try {
+                verifyDownloadedApk(context, staging)
+            } catch (e: Exception) {
+                staging.delete()
+                throw e
+            }
             if (destination.exists()) destination.delete()
             if (!staging.renameTo(destination)) {
                 throw UpdateException(L.t("Не удалось сохранить APK на диск.", "Could not save the APK to disk."))

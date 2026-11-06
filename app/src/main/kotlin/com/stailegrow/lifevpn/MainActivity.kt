@@ -42,6 +42,7 @@ import com.stailegrow.lifevpn.model.ProxyConfig
 import com.stailegrow.lifevpn.ui.HomeScreen
 import com.stailegrow.lifevpn.ui.ServersScreen
 import com.stailegrow.lifevpn.ui.StatsScreen
+import com.stailegrow.lifevpn.ui.LogsScreen
 import com.stailegrow.lifevpn.ui.SettingsScreen
 import com.stailegrow.lifevpn.ui.components.AddServerDialog
 import com.stailegrow.lifevpn.ui.components.AppBackground
@@ -114,6 +115,12 @@ class MainActivity : ComponentActivity() {
         } else {
             ConnectionManager.connect(this, server)
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Проверка версии при каждом открытии — до подключения.
+        com.stailegrow.lifevpn.core.UpdateChecker.checkOnOpen()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -241,6 +248,7 @@ private fun AppRoot(onToggle: (ProxyConfig) -> Unit) {
                         AppTab.HOME -> HomeScreen(onToggle = onToggle, modifier = Modifier.fillMaxSize())
                         AppTab.SERVERS -> ServersScreen(modifier = Modifier.fillMaxSize())
                         AppTab.STATS -> StatsScreen(modifier = Modifier.fillMaxSize())
+                        AppTab.LOGS -> LogsScreen(modifier = Modifier.fillMaxSize())
                         AppTab.SETTINGS -> SettingsScreen(modifier = Modifier.fillMaxSize())
                     }
                 }

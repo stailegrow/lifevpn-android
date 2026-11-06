@@ -11,6 +11,19 @@ enum class Security(val rawValue: String) {
 
     companion object {
         fun fromRaw(value: String?): Security = entries.firstOrNull { it.rawValue == value } ?: NONE
+
+        /**
+         * Строгий разбор параметра `security` из ссылки: отсутствующий или
+         * пустой параметр — NONE (так по протоколу), явно указанное
+         * известное значение — оно (без учёта регистра), неизвестное — null.
+         * Неизвестный тип защиты нельзя молча превращать в NONE: такой узел
+         * подключался бы без шифрования.
+         */
+        fun fromLink(value: String?): Security? {
+            val raw = value?.trim()?.lowercase()
+            if (raw.isNullOrEmpty()) return NONE
+            return entries.firstOrNull { it.rawValue == raw }
+        }
     }
 }
 

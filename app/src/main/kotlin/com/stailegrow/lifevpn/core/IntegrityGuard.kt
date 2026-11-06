@@ -21,7 +21,7 @@ import kotlin.system.exitProcess
  */
 internal object IntegrityGuard {
 
-    private const val EXPECTED_SHA256 = "49022FE4A3C4B1BCC5331C0B4393AF38C0BFF407B6A62F3808489891E096D682"
+    internal const val EXPECTED_SHA256 = "49022FE4A3C4B1BCC5331C0B4393AF38C0BFF407B6A62F3808489891E096D682"
 
     fun enforce(context: Context) {
         if (BuildConfig.DEBUG) return
@@ -31,6 +31,9 @@ internal object IntegrityGuard {
             exitProcess(0)
         }
     }
+
+    fun sha256Hex(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02X".format(it) }
 
     @Suppress("DEPRECATION")
     private fun signerSha256(context: Context): String? {

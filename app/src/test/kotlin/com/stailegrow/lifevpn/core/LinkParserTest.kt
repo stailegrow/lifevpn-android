@@ -104,4 +104,27 @@ class LinkParserTest {
         assertNull(config.sni)
         assertEquals("chrome", config.fingerprint)
     }
+
+    @Test fun `missing and empty security mean none, known values ignore case`() {
+        assertEquals(Security.NONE, LinkParser.parse("vless://u@h:443").security)
+        assertEquals(Security.NONE, LinkParser.parse("vless://u@h:443?security=").security)
+        assertEquals(Security.NONE, LinkParser.parse("vless://u@h:443?security=none").security)
+        assertEquals(Security.TLS, LinkParser.parse("vless://u@h:443?security=TLS").security)
+        assertEquals(Security.REALITY, LinkParser.parse("vless://u@h:443?security=Reality&pbk=x").security)
+    }
+
+    @Test fun `unknown explicit security is rejected instead of downgraded to none`() {
+        assertThrows(LinkParser.ParseException.UnsupportedSecurity::class.java) {
+            LinkParser.parse("vless://u@h:443?security=quantum")
+        }
+        // Тот же путь для вставки, QR, файла и подписки: parseMany пропускает узел с ошибкой.
+        val result = LinkParser.parseMany("vless://u@h:443?security=xtls\nvless://u@h:443?security=tls")
+        assertEquals(1, result.configs.size)
+        assertEquals(1, result.errors.size)
+    }
+
+    @Test fun `stored profiles keep compatible deserialization`() {
+        assertEquals(Security.TLS, Security.fromRaw("tls"))
+        assertNull(Security.fromLink("unknown"))
+    }
 }

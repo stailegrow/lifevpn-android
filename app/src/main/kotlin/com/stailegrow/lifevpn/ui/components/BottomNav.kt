@@ -22,6 +22,7 @@ enum class AppTab(val labelRU: String, val labelEN: String) {
     HOME("ГЛАВНАЯ", "HOME"),
     SERVERS("СЕРВЕРА", "SERVERS"),
     STATS("СТАТИСТИКА", "STATS"),
+    LOGS("ЖУРНАЛ", "LOGS"),
     SETTINGS("НАСТРОЙКИ", "SETTINGS"),
 }
 
@@ -52,6 +53,7 @@ fun BottomNav(selected: AppTab, onSelect: (AppTab) -> Unit, modifier: Modifier =
                     AppTab.HOME -> HomeIcon(color = color)
                     AppTab.SERVERS -> ServersIcon(color = color)
                     AppTab.STATS -> StatsIcon(color = color)
+                    AppTab.LOGS -> LogsIcon(color = color)
                     AppTab.SETTINGS -> SettingsIcon(color = color)
                 }
                 Text(

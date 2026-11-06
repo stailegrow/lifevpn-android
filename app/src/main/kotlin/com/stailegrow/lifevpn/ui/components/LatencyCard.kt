@@ -1,16 +1,18 @@
 package com.stailegrow.lifevpn.ui.components
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.stailegrow.lifevpn.core.L
@@ -19,40 +21,15 @@ import com.stailegrow.lifevpn.model.ProxyConfig
 import com.stailegrow.lifevpn.ui.theme.HudType
 import com.stailegrow.lifevpn.ui.theme.LocalPalette
 
-/**
- * Карточка "// ЗАДЕРЖКА" — история пинга по каждому серверу (вкладка
- * "Сервера"). Шкала своя у строки: Sparkline сам берёт min/max из значений
- * именно этого сервера, как подписано на маке.
- */
 @Composable
-fun LatencyCard(
-    servers: List<ProxyConfig>,
-    pingHistory: Map<String, List<Int>>,
-    modifier: Modifier = Modifier,
-) {
+fun LatencyCard(servers: List<ProxyConfig>, pingHistory: Map<String, List<Int>>, modifier: Modifier = Modifier) {
     val palette = LocalPalette.current
-
     HudCard(title = L.t("Задержка", "Latency"), modifier = modifier) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text(
-                text = L.t("опрос каждые 10 с", "polled every 10 s"),
-                style = HudType.body(10.sp),
-                color = palette.textSecondary,
-            )
-            Text(
-                text = L.t("своя шкала у строки", "own scale per row"),
-                style = HudType.body(10.sp),
-                color = palette.textSecondary,
-            )
-        }
-
+        Text(L.t("Опрос каждые 10 с", "Polled every 10 s"), style = HudType.body(10.sp),
+            color = palette.textSecondary, modifier = Modifier.padding(bottom = 12.dp))
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             for (config in servers) {
-                val history = pingHistory[config.id] ?: emptyList()
-                LatencyRow(name = extractTitle(config.displayName), history = history)
+                LatencyRow(extractTitle(config.displayName), pingHistory[config.id].orEmpty())
             }
         }
     }
@@ -62,42 +39,21 @@ fun LatencyCard(
 private fun LatencyRow(name: String, history: List<Int>) {
     val palette = LocalPalette.current
     val last = history.lastOrNull()
-    val previous = if (history.size >= 2) history[history.size - 2] else null
-
-    val color = if (last == null) {
-        palette.textSecondary
-    } else {
-        when (PingQuality.of(last)) {
-            PingQuality.GOOD -> palette.good
-            PingQuality.FAIR -> palette.warn
-            PingQuality.POOR -> palette.bad
+    val color = when (last?.let { PingQuality.of(it) }) {
+        PingQuality.GOOD -> palette.good
+        PingQuality.FAIR -> palette.warn
+        PingQuality.POOR -> palette.bad
+        null -> palette.textSecondary
+    }
+    Column(Modifier.fillMaxWidth()
+        .background(palette.textPrimary.copy(alpha = 0.035f), RoundedCornerShape(12.dp))
+        .padding(horizontal = 10.dp, vertical = 8.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(name, style = HudType.body(12.sp), color = palette.textPrimary,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Text(last?.let { L.t("$it мс", "$it ms") } ?: "—", style = HudType.code(11.sp), color = color)
         }
-    }
-    val trend = when {
-        last == null || previous == null -> ""
-        last < previous -> "▼"
-        last > previous -> "▲"
-        else -> ""
-    }
-    val valueText = last?.let { "$trend$it" } ?: "—"
-
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-        Text(
-            text = name,
-            style = HudType.body(13.sp),
-            color = palette.textPrimary,
-            modifier = Modifier.width(84.dp),
-        )
-        Sparkline(
-            values = history,
-            color = color,
-            modifier = Modifier.weight(1f).height(24.dp).padding(horizontal = 8.dp),
-        )
-        Text(
-            text = valueText,
-            style = HudType.code(12.sp),
-            color = color,
-            modifier = Modifier.width(50.dp),
-        )
+        Sparkline(history, color, Modifier.fillMaxWidth().height(40.dp).padding(top = 4.dp))
     }
 }

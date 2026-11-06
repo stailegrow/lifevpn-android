@@ -130,3 +130,27 @@ fun SettingsIcon(color: Color, modifier: Modifier = Modifier) {
         }
     }
 }
+
+/** «Журнал» — мягкий листок с тремя заливными строками разной длины. */
+@Composable
+fun LogsIcon(color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier.size(22.dp)) {
+        val w = size.width
+        val h = size.height
+        drawRoundRect(
+            color = color.copy(alpha = 0.35f),
+            topLeft = Offset(w * 0.14f, h * 0.06f),
+            size = androidx.compose.ui.geometry.Size(w * 0.72f, h * 0.88f),
+            cornerRadius = CornerRadius(w * 0.18f, w * 0.18f),
+        )
+        val lineHeight = h * 0.11f
+        listOf(0.26f to 0.48f, 0.46f to 0.36f, 0.66f to 0.24f).forEach { (y, length) ->
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(w * 0.27f, h * y),
+                size = androidx.compose.ui.geometry.Size(w * length, lineHeight),
+                cornerRadius = CornerRadius(lineHeight / 2f, lineHeight / 2f),
+            )
+        }
+    }
+}

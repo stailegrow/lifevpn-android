@@ -29,8 +29,8 @@ fun UpdateBanner(modifier: Modifier = Modifier) {
     val content: Content? = when (val s = state) {
         is UpdateChecker.State.Available -> Content(
             text = L.t(
-                "Доступна версия ${s.info.version} — нажмите, чтобы скачать",
-                "Version ${s.info.version} is available — tap to download",
+                "Необходимо обновить приложение: доступна версия ${s.info.version}. Нажмите, чтобы скачать",
+                "Please update the app: version ${s.info.version} is available. Tap to download",
             ),
             tone = NoticeTone.INFO,
             onClick = { UpdateChecker.startDownload(context, s.info) },
