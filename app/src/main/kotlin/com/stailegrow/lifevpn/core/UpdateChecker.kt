@@ -44,7 +44,8 @@ object UpdateChecker {
     private const val CONNECT_TIMEOUT_MS = 8_000
     private const val READ_TIMEOUT_MS = 15_000
 
-    class UpdateException(message: String) : Exception(message)
+    /** retryable — сбой сети или ответ 408/429/5xx: имеет смысл повторить. */
+    class UpdateException(message: String, val retryable: Boolean = false) : Exception(message)
 
     data class UpdateInfo(
         val version: String,
@@ -134,9 +135,17 @@ object UpdateChecker {
                 }
                 _state.value = State.ReadyToInstall(info, file)
             } catch (e: Exception) {
+                // Сбой сети/GitHub после всех попыток — даём скачать вручную.
+                val manual = e is UpdateException && e.retryable && openReleasePage(appContext, info)
+                val reason = e.message ?: L.t("Не удалось скачать обновление.", "Could not download the update.")
                 _state.value = State.Failed(
                     info = info,
-                    message = e.message ?: L.t("Не удалось скачать обновление.", "Could not download the update."),
+                    message = if (manual) {
+                        L.t("$reason Страница релиза открыта в браузере — можно скачать вручную.",
+                            "$reason The release page opened in the browser — you can download it manually.")
+                    } else {
+                        reason
+                    },
                     duringDownload = true,
                 )
             }
@@ -281,41 +290,120 @@ object UpdateChecker {
         return false
     }
 
+    /** Страница релиза на GitHub: запасной путь, если скачать не вышло. */
+    private fun openReleasePage(context: Context, info: UpdateInfo): Boolean = try {
+        val page = "https://github.com/stailegrow/lifevpn-android/releases/tag/${Uri.encode(info.tagName)}"
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(page)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        true
+    } catch (e: Exception) {
+        false
+    }
+
+    /** Ответ сервера, который стоит повторить: 408, 429 и 5xx. */
+    internal fun isRetryableStatus(code: Int): Boolean = code == 408 || code == 429 || code in 500..599
+
+    /**
+     * План попыток скачивания: хранилище файлов GitHub временами отвечает
+     * 503/504 или не отвечает вовсе, а путь через VPN-сервер может быть хуже
+     * прямого. Две попытки обычным путём (через туннель, если VPN включён),
+     * затем две напрямую мимо туннеля, с паузами. Подлинность от пути не
+     * зависит: APK всё равно проверяется по сертификату издателя.
+     */
+    internal data class Step(val direct: Boolean, val delayMs: Long)
+
+    internal val DOWNLOAD_PLAN = listOf(Step(false, 0), Step(false, 2_000), Step(true, 3_000), Step(true, 6_000))
+
+    /** Прогоняет план: повторяет только UpdateException с retryable. */
+    internal fun <T> withRetries(
+        plan: List<Step> = DOWNLOAD_PLAN,
+        sleep: (Long) -> Unit = { Thread.sleep(it) },
+        attempt: (direct: Boolean) -> T,
+    ): T {
+        var last: Exception = UpdateException(L.t("Не удалось скачать обновление.", "Could not download the update."))
+        for (step in plan) {
+            if (step.delayMs > 0) sleep(step.delayMs)
+            try {
+                return attempt(step.direct)
+            } catch (e: UpdateException) {
+                last = e
+                if (!e.retryable) throw e
+            }
+        }
+        throw last
+    }
+
+    /** Открытый ответ на скачивание — одинаковый для обоих путей. */
+    private class Opened(val code: Int, val contentLength: Long, val input: java.io.InputStream, val close: () -> Unit)
+
+    private fun open(url: URL, direct: Boolean): Opened {
+        if (direct) {
+            val response = DirectHttp.get(url, "LifeVPN/${BuildConfig.VERSION_NAME}", READ_TIMEOUT_MS)
+            return Opened(response.code, response.contentLength, response.body) { response.close() }
+        }
+        val connection = url.openConnection() as HttpURLConnection
+        connection.connectTimeout = CONNECT_TIMEOUT_MS
+        connection.readTimeout = READ_TIMEOUT_MS
+        connection.instanceFollowRedirects = true
+        val code = connection.responseCode
+        val input = if (code in 200..299) connection.inputStream else java.io.ByteArrayInputStream(ByteArray(0))
+        return Opened(code, connection.contentLengthLong, input) { connection.disconnect() }
+    }
+
     /** Блокирующий вызов — звать только с Dispatchers.IO. Качает APK во
-     *  временный файл в кэше приложения (через staging-файл — тот же
-     *  приём, что у GeoAssets.fetch(), чтобы оборванная закачка не
-     *  оставила на диске огрызок, который потом попытаются установить) и
-     *  возвращает готовый файл. onProgress зовётся с процентом (0..100),
-     *  если сервер прислал Content-Length — не всегда, тогда прогресс
-     *  просто не обновляется до самого конца. */
+     *  временный файл в кэше приложения (через staging-файл, чтобы
+     *  оборванная закачка не оставила на диске огрызок) и возвращает
+     *  готовый проверенный файл. onProgress зовётся с процентом (0..100),
+     *  если сервер прислал Content-Length. */
     private fun downloadApkBlocking(context: Context, info: UpdateInfo, onProgress: (Int) -> Unit): File {
         if (!isOwnReleaseAsset(info.downloadUrl)) {
             throw UpdateException(L.t("Неверная ссылка на APK.", "Invalid APK link."))
         }
         val url = URL(info.downloadUrl)
-        val connection = url.openConnection() as HttpURLConnection
-        connection.connectTimeout = CONNECT_TIMEOUT_MS
-        connection.readTimeout = READ_TIMEOUT_MS
-        connection.instanceFollowRedirects = true
+        val dir = File(context.cacheDir, "updates").apply { mkdirs() }
+        val staging = File(dir, "update.apk.part")
+        val destination = File(dir, "LifeVPN-${info.version}.apk")
+
+        withRetries { direct ->
+            onProgress(0)
+            downloadOnce(url, direct, info, staging, onProgress)
+        }
 
         try {
-            val code = try {
-                connection.responseCode
-            } catch (e: java.io.IOException) {
-                throw UpdateException(L.t("Не удалось подключиться к GitHub (${e.message ?: "таймаут"}).", "Could not connect to GitHub (${e.message ?: "timeout"})."))
-            }
+            verifyDownloadedApk(context, staging)
+        } catch (e: Exception) {
+            staging.delete()
+            throw e
+        }
+        if (destination.exists()) destination.delete()
+        if (!staging.renameTo(destination)) {
+            throw UpdateException(L.t("Не удалось сохранить APK на диск.", "Could not save the APK to disk."))
+        }
+        onProgress(100)
+        return destination
+    }
+
+    /** Одна попытка: сетевые сбои и 408/429/5xx — retryable. */
+    private fun downloadOnce(url: URL, direct: Boolean, info: UpdateInfo, staging: File, onProgress: (Int) -> Unit) {
+        val opened = try {
+            open(url, direct)
+        } catch (e: java.io.IOException) {
+            throw UpdateException(
+                L.t("Не удалось подключиться к GitHub (${e.message ?: "таймаут"}).", "Could not connect to GitHub (${e.message ?: "timeout"})."),
+                retryable = true,
+            )
+        }
+        try {
+            val code = opened.code
             if (code !in 200..299) {
-                throw UpdateException(L.t("GitHub вернул код $code при скачивании.", "GitHub returned code $code while downloading."))
+                throw UpdateException(
+                    L.t("GitHub вернул код $code при скачивании.", "GitHub returned code $code while downloading."),
+                    retryable = isRetryableStatus(code),
+                )
             }
-
-            val total = connection.contentLengthLong
-            val dir = File(context.cacheDir, "updates").apply { mkdirs() }
-            val staging = File(dir, "update.apk.part")
-            val destination = File(dir, "LifeVPN-${info.version}.apk")
-
+            val total = opened.contentLength
             var readBytes = 0L
             try {
-                connection.inputStream.use { input ->
+                opened.input.use { input ->
                     staging.outputStream().use { output ->
                         val buffer = ByteArray(64 * 1024)
                         while (true) {
@@ -325,7 +413,7 @@ object UpdateChecker {
                             readBytes += n
                             val cap = if (info.apkSizeBytes > 0) info.apkSizeBytes else MAX_APK_BYTES
                             if (readBytes > cap) {
-                                throw java.io.IOException(L.t("файл больше, чем объявлено в релизе", "the file is larger than the release declares"))
+                                throw UpdateException(L.t("Файл больше, чем объявлено в релизе.", "The file is larger than the release declares."))
                             }
                             if (total > 0) {
                                 onProgress(((readBytes * 100) / total).toInt().coerceIn(0, 100))
@@ -335,28 +423,21 @@ object UpdateChecker {
                 }
             } catch (e: java.io.IOException) {
                 staging.delete()
-                throw UpdateException(L.t("Скачивание оборвалось (${e.message ?: "таймаут"}).", "The download was interrupted (${e.message ?: "timeout"})."))
+                throw UpdateException(
+                    L.t("Скачивание оборвалось (${e.message ?: "таймаут"}).", "The download was interrupted (${e.message ?: "timeout"})."),
+                    retryable = true,
+                )
+            } catch (e: UpdateException) {
+                staging.delete()
+                throw e
             }
 
             if (total > 0 && readBytes < total) {
                 staging.delete()
-                throw UpdateException(L.t("Файл пришёл обрезанным.", "The file arrived truncated."))
+                throw UpdateException(L.t("Файл пришёл обрезанным.", "The file arrived truncated."), retryable = true)
             }
-
-            try {
-                verifyDownloadedApk(context, staging)
-            } catch (e: Exception) {
-                staging.delete()
-                throw e
-            }
-            if (destination.exists()) destination.delete()
-            if (!staging.renameTo(destination)) {
-                throw UpdateException(L.t("Не удалось сохранить APK на диск.", "Could not save the APK to disk."))
-            }
-            onProgress(100)
-            return destination
         } finally {
-            connection.disconnect()
+            opened.close()
         }
     }
 
