@@ -33,9 +33,11 @@ object XrayConfigBuilder {
         // Журнал соединений (см. core/RoutingLog.kt): куда ушло каждое —
         // туннель, напрямую или блок.
         val accessLogPath: String? = null,
-        // Порт эндпоинта счётчиков трафика (см. core/SessionTraffic.kt).
-        val metricsPort: Int? = null,
     )
+    // Локальных портов ядро на Android не открывает вообще: ни socks/http,
+    // ни metrics/pprof — 127.0.0.1 доступен любому приложению на телефоне,
+    // а по такому порту чужое приложение находит работающий VPN. Трафик
+    // считается без ядра (core/SessionTraffic.kt).
 
     fun makeJSON(config: ProxyConfig, options: Options = Options()): String =
         makeTree(config, options).toString(2)
@@ -55,18 +57,6 @@ object XrayConfigBuilder {
             .put("routing", routing(options.routing))
 
         dns(options.routing)?.let { root.put("dns", it) }
-
-        options.metricsPort?.let { port ->
-            root.put("stats", JSONObject())
-            root.put(
-                "policy",
-                JSONObject().put(
-                    "system",
-                    JSONObject().put("statsOutboundUplink", true).put("statsOutboundDownlink", true),
-                ),
-            )
-            root.put("metrics", JSONObject().put("tag", "metrics").put("listen", "127.0.0.1:$port"))
-        }
 
         val env = JSONObject()
         options.tunFileDescriptor?.let { fd ->

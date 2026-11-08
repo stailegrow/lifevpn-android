@@ -18,6 +18,7 @@ import com.stailegrow.lifevpn.core.SessionTraffic
 import com.stailegrow.lifevpn.core.L
 import com.stailegrow.lifevpn.core.GeoAssets
 import com.stailegrow.lifevpn.core.IPChecker
+import com.stailegrow.lifevpn.core.IsolatedApps
 import com.stailegrow.lifevpn.core.SettingsStore
 import com.stailegrow.lifevpn.core.XrayConfigBuilder
 import com.stailegrow.lifevpn.core.XrayCoreBridge
@@ -249,7 +250,15 @@ class LifeVpnService : VpnService(), libXray.DialerController {
                 // пакет успели удалить с телефона — addDisallowedApplication
                 // кидает NameNotFoundException, просто пропускаем его и не
                 // валим всё подключение из-за одного отсутствующего пакета.
-                for (pkg in SettingsStore.excludedApps.value) {
+                // Плюс в «Обходе РФ» — российские приложения вроде MAX (см.
+                // core/IsolatedApps.kt): мимо туннеля они не узнают адрес
+                // VPN-сервера своими проверками внешнего IP.
+                val isolated = if (IsolatedApps.appliesTo(routing, SettingsStore.isolateRuApps.value)) {
+                    IsolatedApps.known.map { it.packageName }
+                } else {
+                    emptyList()
+                }
+                for (pkg in (SettingsStore.excludedApps.value + isolated) - packageName) {
                     try {
                         builder.addDisallowedApplication(pkg)
                     } catch (e: PackageManager.NameNotFoundException) {
@@ -277,15 +286,13 @@ class LifeVpnService : VpnService(), libXray.DialerController {
                 // просто нет geosite:/geoip: правил, которым он был бы нужен:
                 // ConnectionManager.resolveRouting() уже проверил это раньше,
                 // чем стартовал сервис).
-                val metricsPort = SessionTraffic.freePort()
-                SessionTraffic.reset(metricsPort)
+                SessionTraffic.reset()
                 val options = XrayConfigBuilder.Options(
                     routing = routing,
                     tunFileDescriptor = iface.fd,
                     tunMtu = TUN_MTU,
                     geoAssetsDir = GeoAssets.dirPath(),
                     accessLogPath = RoutingLog.file(this).absolutePath,
-                    metricsPort = metricsPort,
                 )
                 RoutingLog.reset(this)
                 XrayCoreBridge.runXray(XrayConfigBuilder.makeJSON(server, options))

@@ -30,6 +30,7 @@ object SettingsStore {
     private const val KEY_LANGUAGE = "language"
     private const val KEY_CUSTOM_DOMAINS = "custom_direct_domains"
     private const val KEY_EXCLUDED_APPS = "excluded_apps"
+    private const val KEY_ISOLATE_RU_APPS = "isolate_ru_apps"
 
     private var prefs: SharedPreferences? = null
 
@@ -60,6 +61,11 @@ object SettingsStore {
     private val _excludedApps = MutableStateFlow<Set<String>>(emptySet())
     val excludedApps: StateFlow<Set<String>> = _excludedApps.asStateFlow()
 
+    // Изоляция российских приложений (MAX и др.) в «Обходе РФ» — см.
+    // core/IsolatedApps.kt. Включена по умолчанию.
+    private val _isolateRuApps = MutableStateFlow(true)
+    val isolateRuApps: StateFlow<Boolean> = _isolateRuApps.asStateFlow()
+
     fun init(context: Context) {
         if (prefs != null) return
         val store = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -75,6 +81,12 @@ object SettingsStore {
         L.current = language
         _customDirectDomains.value = parseDomains(store.getString(KEY_CUSTOM_DOMAINS, "") ?: "")
         _excludedApps.value = parseDomains(store.getString(KEY_EXCLUDED_APPS, "") ?: "").toSet()
+        _isolateRuApps.value = store.getBoolean(KEY_ISOLATE_RU_APPS, true)
+    }
+
+    fun setIsolateRuApps(value: Boolean) {
+        _isolateRuApps.value = value
+        prefs?.edit()?.putBoolean(KEY_ISOLATE_RU_APPS, value)?.apply()
     }
 
     private fun parseDomains(raw: String): List<String> =

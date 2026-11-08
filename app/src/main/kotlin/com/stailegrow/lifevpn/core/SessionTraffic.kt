@@ -1,5 +1,7 @@
 package com.stailegrow.lifevpn.core
 
+import android.net.TrafficStats
+import android.os.Process
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -10,22 +12,21 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.InetAddress
-import java.net.Proxy
-import java.net.ServerSocket
-import java.net.URL
 
 /**
- * Трафик через туннель за текущую сессию — как в macOS-версии
- * (Core/SessionTraffic.swift).
+ * Трафик VPN за текущую сессию.
  *
- * Ядро само считает байты по каждому outbound (`stats` + `policy.system`) и
- * отдаёт счётчики через встроенный HTTP-эндпоинт `metrics` на 127.0.0.1.
- * Берём только outbound «proxy»: прямой и заблокированный трафик через VPN
- * не ходит и в цифру не входит. Петлевой адрес в TUN не попадает, поэтому
- * запрос к счётчикам идёт прямо к ядру внутри процесса.
+ * Раньше счётчики брались у ядра через его HTTP-эндпоинт `metrics` на
+ * 127.0.0.1. Этот порт был без пароля, а петлевой адрес доступен любому
+ * приложению на телефоне: по нему можно было найти работающий Xray (то есть
+ * понять, что включён VPN), увидеть объём трафика и нагружать ядро через
+ * /debug/pprof. Теперь ядро не открывает ни одного локального порта.
+ *
+ * Считаем системным счётчиком Android по UID приложения: весь трафик
+ * устройства в туннеле уходит наружу через сокеты ядра, а ядро живёт в нашем
+ * процессе. Это зашифрованный объём на проводе: туда же попадают соединения
+ * ядра по маршруту «напрямую» и служебные запросы самого приложения, так что
+ * цифра — оценка расхода, а не точный счёт только по outbound «proxy».
  */
 object SessionTraffic {
 
@@ -38,26 +39,22 @@ object SessionTraffic {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var poller: Job? = null
-    private var port: Int? = null
-
-    /** Свободный локальный порт: занятый уронил бы ядро на старте. */
-    fun freePort(): Int? = runCatching {
-        ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { it.localPort }
-    }.getOrNull()
+    private var baseTx = 0L
+    private var baseRx = 0L
 
     /** Перед запуском ядра: новая сессия считается с нуля. */
-    fun reset(port: Int?) {
+    fun reset() {
         stop()
-        this.port = port
+        baseTx = read { TrafficStats.getUidTxBytes(it) } ?: 0L
+        baseRx = read { TrafficStats.getUidRxBytes(it) } ?: 0L
         _traffic.value = Snapshot()
     }
 
     fun start() {
-        val p = port ?: return
         poller?.cancel()
         poller = scope.launch {
             while (isActive) {
-                runCatching { poll(p) }
+                runCatching { poll() }
                 delay(2_000)
             }
         }
@@ -68,24 +65,19 @@ object SessionTraffic {
         poller = null
     }
 
-    private fun poll(port: Int) {
-        val connection = URL("http://127.0.0.1:$port/debug/vars").openConnection(Proxy.NO_PROXY) as HttpURLConnection
-        connection.connectTimeout = 1_500
-        connection.readTimeout = 1_500
-        try {
-            if (connection.responseCode != 200) return
-            val body = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            val proxy = JSONObject(body).optJSONObject("stats")
-                ?.optJSONObject("outbound")
-                ?.optJSONObject("proxy") ?: return
-            val up = proxy.optLong("uplink", 0)
-            val down = proxy.optLong("downlink", 0)
-            // Счётчики ядра только растут; меньшее значение — уже другой
-            // процесс ядра, прежние цифры нулями не затираем.
-            val current = _traffic.value
-            _traffic.value = Snapshot(maxOf(up, current.uplink), maxOf(down, current.downlink))
-        } finally {
-            connection.disconnect()
-        }
+    private fun poll() {
+        val tx = read { TrafficStats.getUidTxBytes(it) } ?: return
+        val rx = read { TrafficStats.getUidRxBytes(it) } ?: return
+        val current = _traffic.value
+        // Счётчики системы только растут; если вдруг меньше базы (сброс
+        // статистики системой) — прежние цифры нулями не затираем.
+        _traffic.value = Snapshot(
+            uplink = maxOf(tx - baseTx, current.uplink),
+            downlink = maxOf(rx - baseRx, current.downlink),
+        )
     }
+
+    /** TrafficStats.UNSUPPORTED (-1) — устройство не отдаёт статистику. */
+    private inline fun read(block: (Int) -> Long): Long? =
+        block(Process.myUid()).takeIf { it >= 0 }
 }

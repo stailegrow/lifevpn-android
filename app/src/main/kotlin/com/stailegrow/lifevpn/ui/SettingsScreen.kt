@@ -39,6 +39,7 @@ import com.stailegrow.lifevpn.BuildConfig
 import com.stailegrow.lifevpn.core.ConnectionManager
 import com.stailegrow.lifevpn.core.ConnectionState
 import com.stailegrow.lifevpn.core.GeoAssets
+import com.stailegrow.lifevpn.core.IsolatedApps
 import com.stailegrow.lifevpn.core.L
 import com.stailegrow.lifevpn.core.Lang
 import com.stailegrow.lifevpn.core.RoutingChecker
@@ -85,6 +86,9 @@ private fun RoutingCard(modifier: Modifier = Modifier) {
     val presetID by RoutingStore.presetID.collectAsState()
     val customDomains by SettingsStore.customDirectDomains.collectAsState()
     val excludedApps by SettingsStore.excludedApps.collectAsState()
+    val isolateRuApps by SettingsStore.isolateRuApps.collectAsState()
+    val appContext = LocalContext.current.applicationContext
+    val installedIsolated = remember { IsolatedApps.installed(appContext) }
     val geoStatus by GeoAssets.status.collectAsState()
     val connectionState by ConnectionManager.state.collectAsState()
     val isConnected = connectionState is ConnectionState.Connected
@@ -120,6 +124,16 @@ private fun RoutingCard(modifier: Modifier = Modifier) {
                         )
                     }
                 }
+            }
+
+            if (presetID == RoutingPreset.bypassRU.id) {
+                Divider()
+                ToggleRow(
+                    label = L.t("Изолировать российские приложения", "Isolate Russian apps"),
+                    caption = isolationCaption(isolateRuApps, installedIsolated),
+                    checked = isolateRuApps,
+                    onCheckedChange = { SettingsStore.setIsolateRuApps(it) },
+                )
             }
 
             Divider()
@@ -235,6 +249,22 @@ private fun RoutingCard(modifier: Modifier = Modifier) {
             },
         )
     }
+}
+
+private fun isolationCaption(enabled: Boolean, installed: List<IsolatedApps.App>): String {
+    val base = L.t(
+        "MAX, VK, Госуслуги, банки и другие идут мимо VPN и не узнают адрес вашего сервера. " +
+            "Действует со следующего подключения.",
+        "MAX, VK, Gosuslugi, banks and others go around the VPN and cannot learn your server address. " +
+            "Applies from the next connection.",
+    )
+    if (!enabled) return base
+    val found = if (installed.isEmpty()) {
+        L.t("На телефоне таких нет.", "None installed.")
+    } else {
+        L.t("Найдено: ", "Found: ") + installed.joinToString(", ") { it.title }
+    }
+    return "$base $found"
 }
 
 private fun routeCheckSummary(result: RoutingChecker.Result?): String {
